@@ -80,6 +80,9 @@ def download_json(url, filename):
         print(f"Data has been saved to {filename}")
     else:
         print(f"Failed to retrieve data: Status code {response.status_code}")
+        # write placeholder to avoid repeated download attempts
+        with open(filename, 'w') as file:
+            json.dump({"message": "Not Found"}, file)
 
 def download_from_data(package, package_version):
     print(package)
@@ -263,7 +266,7 @@ def get_packname_and_cons_from_setup(librarypath):
 def get_library_constraint_from_metadata(pkg, version, python_version):
     res = {}
     #从setup.py中提取依赖
-    library_path = f"library_path_prefix{pkg}/{pkg}{version}/{pkg}"
+    library_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}"
     if not os.path.exists(library_path):
         pass
     else:
@@ -276,7 +279,7 @@ def get_library_constraint_from_metadata(pkg, version, python_version):
                 res[i[0]] = None
     #print(res)
     #从metadata中提取依赖
-    metadata_path = f"library_path_prefix{pkg}/{pkg}{version}/{pkg}-{version}.dist-info/METADATA"
+    metadata_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}-{version}.dist-info/METADATA"
     if not os.path.exists(metadata_path):
         try:
             with open(constraint_path_prefix + pkg + '/' + pkg + version + '/' + pkg +'.json', 'r') as file:

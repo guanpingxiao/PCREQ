@@ -11,8 +11,11 @@ env/
 .vscode/
 .DS_Store
 
-test.py
-test3.py
+tests/
+.pytest_cache/
+test*.py
+*_test.py
+test_*.py
 main-origin.py
 run.py
 log*.txt

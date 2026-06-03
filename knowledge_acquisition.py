@@ -3,13 +3,14 @@ from extraction.getCall import get_all_used_api
 from extraction.lib_module_and_package_extraction import *
 from extraction.library_api_and_module import *
 from call_graph.get_FDG import * 
-import platform, argparse, os, json, time, requests, logging, subprocess
+import platform, argparse, os, json, time, requests, logging, sys
 from packaging.specifiers import SpecifierSet
 from packaging.version import parse as parse_version
 import requests
 import tarfile
 import zipfile
 import os
+import tempfile
 from packaging import version
 from typing import Optional
 import shutil
@@ -26,6 +27,8 @@ library_path_prefix = ""
 constraint_path_prefix = ""
 version_path_prefix = ""
 api_path_prefix = ""
+
+_stats = {"downloaded": 0, "failed": 0, "skipped": 0}
 
 def setup_path(library_path_prefix_pass, constraint_path_prefix_pass, version_path_prefix_pass, api_path_prefix_pass):
     global library_path_prefix, constraint_path_prefix, version_path_prefix, api_path_prefix
@@ -78,8 +81,8 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
             #print(proj_dependency)
             if len(condidate_version) >= 150:
                 condidate_version = condidate_version[-150:]
-            elif len(condidate_version) >= 10:
-                condidate_version = condidate_version[-10:]
+            elif len(condidate_version) >= 30:
+                condidate_version = condidate_version[-30:]
 
             if target_proj_dependency[proj_dependency] in condidate_version:  #将起始requirements.txt中的约束版本放在第一个，模拟pip安装
                 condidate_version.remove(target_proj_dependency[proj_dependency])
@@ -147,7 +150,7 @@ def get_compatible_versions(package_name, python_version):
                     elif SpecifierSet(file_info["requires_python"]).contains(python_version):
                         compatible_versions.append(version)
                         break
-                except:
+                except (KeyError, TypeError):
                     pass
     compatible_versions = filter_versions(compatible_versions)
     compatible_versions.sort(key=parse_version)
@@ -157,14 +160,156 @@ def get_compatible_versions(package_name, python_version):
         compatible_versions.append("2.9.0.post0")
     return compatible_versions
 
-def download_pypi_source(package_name, version = None, python_version = "3.7", output_dir = "."):
-    python_dict = {"2.7": "py27", "3.4": "py34", "3.5": "py35", "3.6": "py36", "3.7": "py37", "3.8": "py38", "3.9": "py39", "3.10": "py310", "3.11": "py311"}
-    env_name = python_dict[python_version]
-    command = f"bash -c 'source /home/lei/anaconda3/bin/activate {env_name} && pip install {package_name}=={version} --no-deps --target=\"{library_path_prefix}{package_name}/{package_name}{version}\"'"
+def _select_download_urls(package_name, version, python_version):
+    """Return priority-sorted download URLs from version constraint JSON.
+
+    Priority: sdist > cpXX wheel (current platform) > other cpXX wheels > rest.
+    """
+    json_path = f"{constraint_path_prefix}{package_name}/{package_name}{version}/{package_name}.json"
+    if not os.path.exists(json_path):
+        return []
     try:
-        subprocess.run(command, shell=True, check=True)
-    except:
-        pass
+        with open(json_path) as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        logging.error("Corrupted constraint JSON, removing: %s", json_path)
+        os.remove(json_path)
+        return []
+    except OSError:
+        return []
+    urls = data.get("urls", [])
+    if not urls:
+        return []
+    # classify
+    sdist = []
+    curr_plat = []
+    other_cp = []
+    rest = []
+    py_tag = f"cp{python_version.replace('.', '')}"
+    if sys.platform.startswith("linux"):
+        plat_tag = "manylinux"
+    elif sys.platform == "darwin":
+        plat_tag = "macosx"
+    elif sys.platform == "win32":
+        plat_tag = "win"
+    else:
+        plat_tag = None
+    for u in urls:
+        if u.get("packagetype") == "sdist":
+            sdist.append(u["url"])
+        elif u.get("python_version") == py_tag:
+            if plat_tag and plat_tag in u.get("filename", ""):
+                curr_plat.append(u["url"])
+            else:
+                other_cp.append(u["url"])
+        else:
+            rest.append(u["url"])
+    return sdist + curr_plat + other_cp + rest
+
+def _extract_archive(archive_path, target_dir):
+    """Extract archive and move contents to target_dir, flattening sdist wrapper."""
+    extract_tmp = os.path.join(os.path.dirname(archive_path), "e")
+    os.makedirs(extract_tmp)
+    if archive_path.endswith(('.tar.gz', '.tgz', '.tar.bz2')):
+        with tarfile.open(archive_path) as tf:
+            tf.extractall(extract_tmp)
+    else:
+        with zipfile.ZipFile(archive_path) as zf:
+            zf.extractall(extract_tmp)
+    items = os.listdir(extract_tmp)
+    os.makedirs(target_dir, exist_ok=True)
+    if len(items) == 1 and os.path.isdir(os.path.join(extract_tmp, items[0])):
+        src_dir = os.path.join(extract_tmp, items[0])
+        for item in os.listdir(src_dir):
+            shutil.move(os.path.join(src_dir, item), os.path.join(target_dir, item))
+    else:
+        for item in items:
+            shutil.move(os.path.join(extract_tmp, item), os.path.join(target_dir, item))
+
+def download_pypi_source(package_name, version = None, python_version = "3.7", output_dir = "."):
+    target_dir = f"{library_path_prefix}{package_name}/{package_name}{version}"
+    call_module = get_library_call_module(package_name)
+    if os.path.exists(os.path.join(target_dir, call_module)) or os.path.exists(os.path.join(target_dir, call_module + ".py")):
+        _stats["skipped"] += 1
+        return
+    # remove stale empty/incomplete directory
+    if os.path.exists(target_dir):
+        shutil.rmtree(target_dir)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        urls = _select_download_urls(package_name, version, python_version)
+        if urls:
+            for url in urls:
+                filename = os.path.basename(url.split("#")[0].split("?")[0])
+                path = os.path.join(tmpdir, filename)
+                for attempt in range(3):
+                    try:
+                        r = requests.get(url, timeout=120)
+                        if r.status_code == 200:
+                            with open(path, "wb") as f:
+                                f.write(r.content)
+                            _extract_archive(path, target_dir)
+                            _stats["downloaded"] += 1
+                            break
+                    except requests.ConnectionError as e:
+                        if attempt < 2:
+                            time.sleep(2 ** attempt)
+                            continue
+                        logging.warning("Download retry exhausted: %s: %s", url[:80], e)
+                    except OSError as e:
+                        logging.critical("Disk write error: %s", e)
+                        sys.exit(1)
+                else:
+                    continue  # retry exhausted, try next URL
+                break  # success, stop URL iteration
+        else:
+            # no constraint JSON available yet; download from pypi.org API directly
+            pypi_url = f"https://pypi.org/pypi/{package_name}/{version}/json"
+            try:
+                r = requests.get(pypi_url, timeout=30)
+                if r.status_code == 200:
+                    data = r.json()
+                    for u in data.get("urls", []):
+                        if u.get("packagetype") == "sdist":
+                            url = u["url"]
+                            break
+                    else:
+                        url = data["urls"][0]["url"] if data.get("urls") else None
+                    if url:
+                        path = os.path.join(tmpdir, os.path.basename(url.split("#")[0].split("?")[0]))
+                        r2 = requests.get(url, timeout=120)
+                        if r2.status_code == 200:
+                            with open(path, "wb") as f:
+                                f.write(r2.content)
+                            _extract_archive(path, target_dir)
+            except requests.RequestException:
+                pass
+
+    # handle src-layout: if call_module is nested (e.g., src/PIL), move to root
+    if not os.path.exists(os.path.join(target_dir, call_module)):
+        src_chk = os.path.join(target_dir, "src", call_module)
+        if os.path.isdir(src_chk):
+            shutil.move(src_chk, os.path.join(target_dir, call_module))
+        else:
+            for root, dirs, _ in os.walk(target_dir):
+                for d in dirs:
+                    if d == call_module:
+                        shutil.move(os.path.join(root, d), os.path.join(target_dir, d))
+                        break
+        # auto-detect: scan for package root when call_module not found
+        if not os.path.exists(os.path.join(target_dir, call_module)):
+            for d in sorted(os.listdir(target_dir)):
+                full = os.path.join(target_dir, d)
+                if os.path.isdir(full) and not d.startswith('.') and \
+                   not d.endswith(('.dist-info', '.libs', '.data', '.egg-info')) and \
+                   (os.path.exists(os.path.join(full, '__init__.py')) or
+                    any(f.endswith('.py') for f in os.listdir(full))):
+                    shutil.move(full, os.path.join(target_dir, call_module))
+                    break
+        if not os.path.exists(os.path.join(target_dir, call_module)) and \
+           not os.path.exists(os.path.join(target_dir, call_module + ".py")):
+            _stats["failed"] += 1
+            logging.warning("Download failed for %s==%s", package_name, version)
 
 def extract_fine_grained_knowledge(lib, version):  
     library_call_module = get_library_call_module(lib)
@@ -177,14 +322,14 @@ def extract_fine_grained_knowledge(lib, version):
     res["modules"] = list(dir)
     try:
         api_usage_in_target_library, _1, __2, _3  = get_all_used_api(library_path, library_call_module)
-    except:
+    except (SyntaxError, ValueError, OSError):
         api_usage_in_target_library = []
     res["api_usage"] = list(api_usage_in_target_library)       
     funcs = res["functions"]
-    new_funcs = shortenPath(funcs, lib, version)
+    new_funcs = shortenPath(funcs, lib, version, library_path_prefix)
     res["functions"] = new_funcs
     classes = res["classes"]
-    new_classes = shortenPath(classes, lib, version)
+    new_classes = shortenPath(classes, lib, version, library_path_prefix)
     res["classes"] = new_classes
     with open(f"{api_path_prefix}{lib}/{version}.json", "w") as f:
         json.dump(res, f)
@@ -197,6 +342,7 @@ def task(args):
     
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
     start = time.time()
 
     # 创建ArgumentParser对象
@@ -225,7 +371,23 @@ if __name__ == '__main__':
     api_path_prefix = f"{knowledge_path}library_api/"
     setup_path(library_path_prefix, constraint_path_prefix, version_path_prefix, api_path_prefix)
 
-   
+    # auto-create knowledge directories
+    for p in [knowledge_path, library_path_prefix, constraint_path_prefix, api_path_prefix]:
+        os.makedirs(p, exist_ok=True)
+
+    # add file logging (append across runs, INFO+ to file, WARNING+ to console)
+    log_file = os.path.join(knowledge_path, "knowledge_acquisition.log")
+    fh = logging.FileHandler(log_file, mode='a')
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logging.getLogger().addHandler(fh)
+    logging.getLogger().setLevel(logging.INFO)
+    for h in logging.getLogger().handlers:
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            h.setLevel(logging.WARNING)
+    logging.info("=== Build: %s | %s %s->%s | py%s ===",
+                 target_project, target_library, start_version, target_version, python_version)
+
     fake_start_proj_dependency = get_proj_dependency_from_requirements(start_requirements_path)
     start_proj_dependency = {}
     for i in fake_start_proj_dependency:
@@ -284,6 +446,11 @@ if __name__ == '__main__':
     #print(tasks)
     with Pool(processes=min(20, cpu_count())) as pool:
         pool.map(task, tasks)
+
+    print("Build complete: %d downloaded, %d failed, %d skipped"
+          % (_stats["downloaded"], _stats["failed"], _stats["skipped"]))
+    logging.info("Build complete: %d downloaded, %d failed, %d skipped",
+                 _stats["downloaded"], _stats["failed"], _stats["skipped"])
 
 
         

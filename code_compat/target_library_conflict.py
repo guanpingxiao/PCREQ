@@ -503,10 +503,10 @@ def get_all_library_info(library_path, library_call_module, version, lib):
         api_usage_in_target_library, _1, __2, _3  = get_all_used_api(library_path, library_call_module)
         res["api_usage"] = list(api_usage_in_target_library)
         funcs = res["functions"]
-        new_funcs = shortenPath(funcs, lib, version)
+        new_funcs = shortenPath(funcs, lib, version, library_path_prefix)
         res["functions"] = new_funcs
         classes = res["classes"]
-        new_classes = shortenPath(classes, lib, version)
+        new_classes = shortenPath(classes, lib, version, library_path_prefix)
         res["classes"] = new_classes
         with open(json_file_path, "w") as f:
             json.dump(res, f)

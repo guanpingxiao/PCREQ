@@ -124,7 +124,8 @@ def get_library_call_module(library):
             'pytorch-lightning': 'pytorch_lightning',
             'opencv-python': 'cv2',
             'scikit-image': 'skimage',
-            'tensorboardx': 'tensorboardX'
+            'tensorboardx': 'tensorboardX',
+            'python-dateutil': 'dateutil',
         }
         return module_map.get(library, library)
 
@@ -190,10 +191,10 @@ class FromImport(ast.NodeVisitor):
 
 #通过解析__init__.py,把源码中的部分API路径缩短
 #缩短API路径可能会将不同文件中的API还原成相同的形式，比如A.b.f,A.c.f都还原成A.f
-def shortenPath(api_dict, library, version): #lst是传入传出参数，保存修正之后的API路径
+def shortenPath(api_dict, library, version, library_path_prefix): #lst是传入传出参数，保存修正之后的API路径
     library_call_module = get_library_call_module(library)
-    library_path = f"/dataset/lei/libraries/{library}/{library}{version}/{library_call_module}"
-    prefix = f"/dataset/lei/libraries/{library}/{library}{version}/"
+    library_path = f"{library_path_prefix}{library}/{library}{version}/{library_call_module}"
+    prefix = f"{library_path_prefix}{library}/{library}{version}/"
     new_dict = api_dict.copy()
     init_files = find_init_files(library_path)
     #py_files = get_path_by_extension(library_path, flag='.py')
