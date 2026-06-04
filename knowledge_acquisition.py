@@ -364,7 +364,7 @@ if __name__ == '__main__':
     target_version = config["targetVersion"]
     python_version = config["pythonVersion"]
     start_requirements_path = config["requirementsPath"]
-    knowledge_path = config["knowledgePath"]
+    knowledge_path = config["knowledgePath"].rstrip("/") + "/"
     library_path_prefix = f"{knowledge_path}libraries/"
     constraint_path_prefix = f"{knowledge_path}version_constraint/"
     version_path_prefix = f"{knowledge_path}"
