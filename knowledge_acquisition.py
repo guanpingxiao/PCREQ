@@ -408,10 +408,8 @@ if __name__ == '__main__':
         for j in compatible_versions:
             if not os.path.exists(f"{constraint_path_prefix}{i}/{i}{j}/{i}.json"):
                 download_from_data(i, j)
-            if not os.path.exists(f"{library_path_prefix}{i}/{i}{j}"):
-                print(f"Downloading {i}{j}")
-                os.makedirs(f"{library_path_prefix}{i}/{i}{j}")
-                download_pypi_source(i, j, python_version, output_dir = f"{library_path_prefix}{i}/{i}{j}")
+            print(f"Downloading {i}{j}")
+            download_pypi_source(i, j, python_version)
         if not os.path.exists(f"{version_path_prefix}library_version.json"):
             data = {}
         else:
