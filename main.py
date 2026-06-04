@@ -109,7 +109,7 @@ def run_upgrade_process(config, options):
     target_project, target_library, target_version = prepare_environment(config)
     python_version = config["pythonVersion"]
     start_requirements_path = config["requirementsPath"]
-    knowledge_path = config["knowledgePath"]
+    knowledge_path = config["knowledgePath"].rstrip("/") + "/"
 
     library_path_prefix = f"{knowledge_path}libraries/"
     version_path_prefix = f"{knowledge_path}"
