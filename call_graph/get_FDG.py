@@ -265,62 +265,42 @@ def get_packname_and_cons_from_setup(librarypath):
 
 def get_library_constraint_from_metadata(pkg, version, python_version):
     res = {}
-    #从setup.py中提取依赖
-    library_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}"
-    if not os.path.exists(library_path):
-        pass
-    else:
-        s = get_packname_and_cons_from_setup(library_path)
-        #print(s)
-        for i in s:
-            if len(i) == 2:
-                res[i[0]] = i[1].replace("-", ".")
-            else:
-                res[i[0]] = None
-    #print(res)
-    #从metadata中提取依赖
-    metadata_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}-{version}.dist-info/METADATA"
-    if not os.path.exists(metadata_path):
+    #从PyPI约束JSON中提取依赖（与旧版行为一致：原代码因路径bug永远读不到setup.py和METADATA）
+    json_path = constraint_path_prefix + pkg + '/' + pkg + version + '/' + pkg + '.json'
+    requires_dist = None
+    if os.path.exists(json_path):
         try:
-            with open(constraint_path_prefix + pkg + '/' + pkg + version + '/' + pkg +'.json', 'r') as file:
+            with open(json_path, 'r') as file:
                 data = json.load(file)
         except:
             print(f"No {pkg}: {version} version constraint")
             download_from_data(pkg, version)
 
-        # 提取 'requires_dist' 键的内容
-        try :
+        try:
             requires_dist = data['info']['requires_dist']
         except:
-            requires_dist= None
-    else:
-        try:
-            with open(metadata_path, 'r') as file:
-                metadata = file.read()
-            #print(metadata)
-        except:
-            metadata = None
-        if metadata is not None:
-            requires_dist_pattern = r"Requires-Dist: (.+?)(?=\n|$)"
-            requires_dist = re.findall(requires_dist_pattern, metadata) 
-        else:
             requires_dist = None
-    #print(requires_dist)
-    
-    if requires_dist is None or len(requires_dist) == 0:
-        try:
-            with open(constraint_path_prefix + pkg + '/' + pkg + version + '/' + pkg +'.json', 'r') as file:
-                data = json.load(file)
-            #print(constraint_path_prefix + pkg + '/' + pkg + version + '/' + pkg +'.json')
-        except:
-            print(f"No {pkg}: {version} version constraint")
-            download_from_data(pkg, version)
-
-        # 提取 'requires_dist' 键的内容
-        try :
-            requires_dist = data['info']['requires_dist']
-        except:
-            requires_dist= None
+    else:
+        #回退到setup.py
+        library_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}"
+        if os.path.exists(library_path):
+            s = get_packname_and_cons_from_setup(library_path)
+            for i in s:
+                if len(i) == 2:
+                    res[i[0]] = i[1].replace("-", ".")
+                else:
+                    res[i[0]] = None
+        else:
+            #回退到METADATA
+            metadata_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}-{version}.dist-info/METADATA"
+            if os.path.exists(metadata_path):
+                try:
+                    with open(metadata_path, 'r') as file:
+                        metadata = file.read()
+                    requires_dist_pattern = r"Requires-Dist: (.+?)(?=\n|$)"
+                    requires_dist = re.findall(requires_dist_pattern, metadata)
+                except:
+                    requires_dist = None
     #print(requires_dist)
                      
     if requires_dist is not None:
