@@ -125,6 +125,13 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
 def filter_versions(version_list):
     return [v for v in version_list if not re.search(r'[a-zA-Z]', v)]
 
+def _is_valid_version(v):
+    try:
+        parse_version(v)
+        return True
+    except Exception:
+        return False
+
 def get_compatible_versions(package_name, python_version):
     url = f"https://pypi.org/pypi/{package_name}/json"
     response = requests.get(url).json()
@@ -153,6 +160,7 @@ def get_compatible_versions(package_name, python_version):
                 except (KeyError, TypeError, InvalidSpecifier):
                     pass
     compatible_versions = filter_versions(compatible_versions)
+    compatible_versions = [v for v in compatible_versions if _is_valid_version(v)]
     compatible_versions.sort(key=parse_version)
     if package_name == "torchvision" and "0.11.0" in compatible_versions:
         compatible_versions.remove("0.11.0")
