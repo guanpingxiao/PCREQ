@@ -4,7 +4,7 @@ from extraction.lib_module_and_package_extraction import *
 from extraction.library_api_and_module import *
 from call_graph.get_FDG import * 
 import platform, argparse, os, json, time, requests, logging, sys
-from packaging.specifiers import SpecifierSet
+from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from packaging.version import parse as parse_version
 import requests
 import tarfile
@@ -150,7 +150,7 @@ def get_compatible_versions(package_name, python_version):
                     elif SpecifierSet(file_info["requires_python"]).contains(python_version):
                         compatible_versions.append(version)
                         break
-                except (KeyError, TypeError):
+                except (KeyError, TypeError, InvalidSpecifier):
                     pass
     compatible_versions = filter_versions(compatible_versions)
     compatible_versions.sort(key=parse_version)
@@ -294,7 +294,10 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
             for root, dirs, _ in os.walk(target_dir):
                 for d in dirs:
                     if d == call_module:
-                        shutil.move(os.path.join(root, d), os.path.join(target_dir, d))
+                        try:
+                            shutil.move(os.path.join(root, d), os.path.join(target_dir, d))
+                        except shutil.Error:
+                            pass  # destination already exists, call_module is in place
                         break
         # auto-detect: scan for package root when call_module not found
         if not os.path.exists(os.path.join(target_dir, call_module)):
