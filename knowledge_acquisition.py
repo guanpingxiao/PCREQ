@@ -84,12 +84,20 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
             elif len(condidate_version) >= 30:
                 condidate_version = condidate_version[-30:]
 
-            if target_proj_dependency[proj_dependency] in condidate_version:  #将起始requirements.txt中的约束版本放在第一个，模拟pip安装
-                condidate_version.remove(target_proj_dependency[proj_dependency])
-                condidate_version.append(target_proj_dependency[proj_dependency])
+            #将起始requirements.txt中的约束版本放在第一个，模拟pip安装
+            target_ver = target_proj_dependency[proj_dependency]
+            target_ver_norm = str(parse_version(target_ver))
+            match_idx = None
+            for idx, v in enumerate(condidate_version):
+                if str(parse_version(v)) == target_ver_norm:
+                    match_idx = idx
+                    break
+            if match_idx is not None:
+                condidate_version.pop(match_idx)
+                condidate_version.append(target_ver)
                 flag = True
             else:
-                condidate_version.append(target_proj_dependency[proj_dependency])
+                condidate_version.append(target_ver)
                 flag = True
             pass
             #condidate_version.append(target_proj_dependency[proj_dependency])
@@ -464,6 +472,7 @@ if __name__ == '__main__':
                 tasks.append((lib, version))
     #print(tasks)
     sys.setrecursionlimit(5000)
+    cleanup_temp_files()
     with Pool(processes=min(20, cpu_count())) as pool:
         pool.map(task, tasks)
 

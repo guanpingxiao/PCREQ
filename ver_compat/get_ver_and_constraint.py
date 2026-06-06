@@ -1,6 +1,7 @@
 from call_graph.get_FDG import *
 from extraction.import_to_path import *
 from utils.util import *
+from packaging.version import parse as parse_version
 
 library_path_prefix = ""
 constraint_path_prefix = ""
@@ -44,12 +45,20 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
                 #print(proj_dependency)
                 condidate_version = condidate_version[-30:]
     
-            if target_proj_dependency[proj_dependency] in condidate_version:  #将起始requirements.txt中的约束版本放在第一个，模拟pip安装
-                condidate_version.remove(target_proj_dependency[proj_dependency])
-                condidate_version.append(target_proj_dependency[proj_dependency])
+            #将起始requirements.txt中的约束版本放在第一个，模拟pip安装
+            target_ver = target_proj_dependency[proj_dependency]
+            target_ver_norm = str(parse_version(target_ver))
+            match_idx = None
+            for idx, v in enumerate(condidate_version):
+                if str(parse_version(v)) == target_ver_norm:
+                    match_idx = idx
+                    break
+            if match_idx is not None:
+                condidate_version.pop(match_idx)
+                condidate_version.append(target_ver)
                 flag = True
             else:
-                condidate_version.append(target_proj_dependency[proj_dependency])
+                condidate_version.append(target_ver)
                 flag = True
             pass
             #condidate_version.append(target_proj_dependency[proj_dependency])
@@ -102,13 +111,14 @@ def get_compatibility_dict(available_versions, python_version):
                     if l in available_versions.keys():                        
                         if constraint[l] is not None and constraint[l] != "none":
                             for v in version_ls[l][python_version]:
-                                if is_version_compat(v, constraint[l]):
-                                    a.append(l+'#'+v)
+                                v_norm = str(parse_version(v))
+                                if is_version_compat(v_norm, constraint[l]):
+                                    a.append(l+'#'+v_norm)
                         else:
                             #a[l] = version_ls[l][python_version]
                             for v in version_ls[l][python_version]:
                                 #if l in available_versions.keys() and v in available_versions[l]:
-                                a.append(l+'#'+v)
+                                a.append(l+'#'+str(parse_version(v)))
                                     
                 res[version] = a
             
