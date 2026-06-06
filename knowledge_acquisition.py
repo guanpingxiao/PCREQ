@@ -245,9 +245,17 @@ def _extract_archive(archive_path, target_dir):
 def download_pypi_source(package_name, version = None, python_version = "3.7", output_dir = "."):
     target_dir = f"{library_path_prefix}{package_name}/{package_name}{version}"
     call_module = get_library_call_module(package_name)
-    if os.path.exists(os.path.join(target_dir, call_module)) or os.path.exists(os.path.join(target_dir, call_module + ".py")):
-        _stats["skipped"] += 1
-        return
+    call_path = os.path.join(target_dir, call_module)
+    if os.path.exists(call_path) or os.path.exists(call_path + ".py"):
+        # Verify integrity: must have at least one .py file
+        try:
+            if os.path.isdir(call_path) and not any(f.endswith('.py') for f in os.listdir(call_path)):
+                shutil.rmtree(target_dir)
+            elif os.path.isdir(call_path) or os.path.exists(call_path + ".py"):
+                _stats["skipped"] += 1
+                return
+        except OSError:
+            shutil.rmtree(target_dir)
     # remove stale empty/incomplete directory
     if os.path.exists(target_dir):
         shutil.rmtree(target_dir)
@@ -260,11 +268,24 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                 path = os.path.join(tmpdir, filename)
                 for attempt in range(3):
                     try:
-                        r = requests.get(url, timeout=120)
+                        r = requests.get(url, timeout=1800, stream=True)
                         if r.status_code == 200:
+                            expected_size = int(r.headers.get('Content-Length', 0))
+                            actual_size = 0
                             with open(path, "wb") as f:
-                                f.write(r.content)
-                            _extract_archive(path, target_dir)
+                                for chunk in r.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                                    actual_size += len(chunk)
+                            if expected_size > 0 and actual_size != expected_size:
+                                continue  # incomplete download, try next attempt
+                            # Extract to tmp dir, then atomically rename
+                            extract_tmp = target_dir + ".tmp"
+                            if os.path.exists(extract_tmp):
+                                shutil.rmtree(extract_tmp)
+                            _extract_archive(path, extract_tmp)
+                            if os.path.exists(target_dir):
+                                shutil.rmtree(target_dir)
+                            os.replace(extract_tmp, target_dir)
                             _stats["downloaded"] += 1
                             break
                     except requests.ConnectionError as e:
@@ -293,11 +314,24 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                         url = data["urls"][0]["url"] if data.get("urls") else None
                     if url:
                         path = os.path.join(tmpdir, os.path.basename(url.split("#")[0].split("?")[0]))
-                        r2 = requests.get(url, timeout=120)
+                        r2 = requests.get(url, timeout=1800, stream=True)
                         if r2.status_code == 200:
+                            expected_size = int(r2.headers.get('Content-Length', 0))
+                            actual_size = 0
                             with open(path, "wb") as f:
-                                f.write(r2.content)
-                            _extract_archive(path, target_dir)
+                                for chunk in r2.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                                    actual_size += len(chunk)
+                            if expected_size > 0 and actual_size != expected_size:
+                                pass  # incomplete, will try next URL in sdist loop
+                            else:
+                                extract_tmp = target_dir + ".tmp"
+                                if os.path.exists(extract_tmp):
+                                    shutil.rmtree(extract_tmp)
+                                _extract_archive(path, extract_tmp)
+                                if os.path.exists(target_dir):
+                                    shutil.rmtree(target_dir)
+                                os.replace(extract_tmp, target_dir)
             except requests.RequestException:
                 pass
 
@@ -354,8 +388,11 @@ def extract_fine_grained_knowledge(lib, version):
     classes = res["classes"]
     new_classes = shortenPath(classes, lib, version, library_path_prefix)
     res["classes"] = new_classes
-    with open(f"{api_path_prefix}{lib}/{version}.json", "w") as f:
+    api_path = f"{api_path_prefix}{lib}/{version}.json"
+    tmp_path = api_path + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(res, f)
+    os.replace(tmp_path, api_path)
 
 def task(args):
     lib, version = args
@@ -443,8 +480,11 @@ if __name__ == '__main__':
             data[i] = {}
         if python_version not in data[i]:
             data[i][python_version] = compatible_versions
-            with open(f"{version_path_prefix}library_version.json", "w") as f:
+            lv_path = f"{version_path_prefix}library_version.json"
+            tmp_path = lv_path + ".tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(data, f)
+            os.replace(tmp_path, lv_path)
     
     available_version = get_available_version(FDG, sub_graph, python_version, target_proj_dependency, target_library, target_version)
     available_version[target_library].append(start_version)

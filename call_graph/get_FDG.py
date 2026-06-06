@@ -2,6 +2,7 @@ import requests
 import json
 import os
 import ast, re
+import time
 import platform
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
@@ -67,22 +68,36 @@ def is_version_compat(proj_cons, lib_cons):
         return False
 
 def download_json(url, filename):
-    # 发送 HTTP GET 请求
-    response = requests.get(url)
+    # 发送 HTTP GET 请求，网络错误时重试3次
+    for retry in range(3):
+        try:
+            response = requests.get(url, timeout=60)
+            break
+        except requests.RequestException:
+            if retry == 2:
+                print(f"Failed to retrieve data after 3 retries: {url}")
+                return
+            time.sleep(2 ** retry)
+    else:
+        return
+    tmp_filename = filename + ".tmp"
     # 确认请求成功
     if response.status_code == 200:
         # 将 JSON 数据加载成 Python 对象
         data = response.json()
-        # 打开一个文件用于写入
-        with open(filename, 'w') as file:
-            # 将 Python 对象写入文件
+        # 原子写入: 先写临时文件, 再 rename
+        with open(tmp_filename, 'w') as file:
             json.dump(data, file, indent=4)
+        os.replace(tmp_filename, filename)
         print(f"Data has been saved to {filename}")
+    elif response.status_code == 404:
+        # write placeholder for truly missing packages to avoid repeated attempts
+        print(f"Package not found: Status code {response.status_code}")
+        with open(tmp_filename, 'w') as file:
+            json.dump({"message": "Not Found"}, file)
+        os.replace(tmp_filename, filename)
     else:
         print(f"Failed to retrieve data: Status code {response.status_code}")
-        # write placeholder to avoid repeated download attempts
-        with open(filename, 'w') as file:
-            json.dump({"message": "Not Found"}, file)
 
 def download_from_data(package, package_version):
     print(package)
