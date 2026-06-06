@@ -265,8 +265,8 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                             continue
                         logging.warning("Download retry exhausted: %s: %s", url[:80], e)
                     except OSError as e:
-                        logging.critical("Disk write error: %s", e)
-                        sys.exit(1)
+                        logging.warning("Disk write error, skipping %s==%s: %s", package_name, version, e)
+                        break
                 else:
                     continue  # retry exhausted, try next URL
                 break  # success, stop URL iteration
@@ -292,6 +292,10 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                             _extract_archive(path, target_dir)
             except requests.RequestException:
                 pass
+
+    # Download failed, nothing to extract
+    if not os.path.exists(target_dir):
+        return
 
     # handle src-layout: if call_module is nested (e.g., src/PIL), move to root
     if not os.path.exists(os.path.join(target_dir, call_module)):
@@ -411,8 +415,9 @@ if __name__ == '__main__':
     target_proj_dependency[target_library] = target_version
     FDG = get_FDG_from_requirements(target_proj_dependency, python_version)
     sub_graph = get_sub_graph(FDG, target_library)
-    #获取所有的候选版本
-    for i in sub_graph:
+    #获取所有的候选版本（含sub_graph可达依赖和直接声明依赖）
+    all_packages = set(sub_graph) | set(target_proj_dependency.keys())
+    for i in all_packages:
         library_call_module = get_library_call_module(i)
         compatible_versions = get_compatible_versions(i, python_version)
         #print(compatible_versions)
@@ -435,13 +440,18 @@ if __name__ == '__main__':
     
     available_version = get_available_version(FDG, sub_graph, python_version, target_proj_dependency, target_library, target_version)
     available_version[target_library].append(start_version)
+    #补全target_proj_dependency中未被sub_graph覆盖的孤立包
+    with open(f"{version_path_prefix}library_version.json", 'r') as file:
+        version_ls = json.load(file)
+    for pkg in target_proj_dependency:
+        if pkg not in available_version:
+            try:
+                available_version[pkg] = version_ls[pkg][python_version]
+            except KeyError:
+                pass
     #print(available_version)
     
-    all_library = []
-    for i in sub_graph:
-        #print(i)
-        if i not in all_library and i in target_proj_dependency.keys():
-            all_library.append(i)
+    all_library = list(target_proj_dependency.keys())
     #print(all_library)
     for lib in all_library:
         if not os.path.exists(f"{api_path_prefix}{lib}/"):
