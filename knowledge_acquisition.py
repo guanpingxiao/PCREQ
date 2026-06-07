@@ -232,6 +232,12 @@ def _extract_archive(archive_path, target_dir):
     else:
         with zipfile.ZipFile(archive_path) as zf:
             zf.extractall(extract_tmp)
+    # Fix zero-permission entries (e.g., old colorama 0.1.x tar has mode 0o0)
+    for root, dirs, files in os.walk(extract_tmp):
+        for d in dirs:
+            os.chmod(os.path.join(root, d), 0o755)
+        for f in files:
+            os.chmod(os.path.join(root, f), 0o644)
     items = os.listdir(extract_tmp)
     os.makedirs(target_dir, exist_ok=True)
     if len(items) == 1 and os.path.isdir(os.path.join(extract_tmp, items[0])):
@@ -277,7 +283,9 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                                     f.write(chunk)
                                     actual_size += len(chunk)
                             if expected_size > 0 and actual_size != expected_size:
-                                continue  # incomplete download, try next attempt
+                                logging.warning("Content-Length mismatch for %s: expected %d, got %d",
+                                                url[:80], expected_size, actual_size)
+                                # still accept the file — CDN proxies often report wrong size
                             # Extract to tmp dir, then atomically rename
                             extract_tmp = target_dir + ".tmp"
                             if os.path.exists(extract_tmp):
@@ -323,15 +331,15 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                                     f.write(chunk)
                                     actual_size += len(chunk)
                             if expected_size > 0 and actual_size != expected_size:
-                                pass  # incomplete, will try next URL in sdist loop
-                            else:
-                                extract_tmp = target_dir + ".tmp"
-                                if os.path.exists(extract_tmp):
-                                    shutil.rmtree(extract_tmp)
-                                _extract_archive(path, extract_tmp)
-                                if os.path.exists(target_dir):
-                                    shutil.rmtree(target_dir)
-                                os.replace(extract_tmp, target_dir)
+                                logging.warning("Content-Length mismatch for %s: expected %d, got %d",
+                                                url[:80], expected_size, actual_size)
+                            extract_tmp = target_dir + ".tmp"
+                            if os.path.exists(extract_tmp):
+                                shutil.rmtree(extract_tmp)
+                            _extract_archive(path, extract_tmp)
+                            if os.path.exists(target_dir):
+                                shutil.rmtree(target_dir)
+                            os.replace(extract_tmp, target_dir)
             except requests.RequestException:
                 pass
 
@@ -355,16 +363,31 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                         break
         # auto-detect: scan for package root when call_module not found
         if not os.path.exists(os.path.join(target_dir, call_module)):
+            found = None
             for d in sorted(os.listdir(target_dir)):
                 full = os.path.join(target_dir, d)
                 if os.path.isdir(full) and not d.startswith('.') and \
-                   not d.endswith(('.dist-info', '.libs', '.data', '.egg-info')) and \
-                   (os.path.exists(os.path.join(full, '__init__.py')) or
-                    any(f.endswith('.py') for f in os.listdir(full))):
-                    shutil.move(full, os.path.join(target_dir, call_module))
-                    break
-        if not os.path.exists(os.path.join(target_dir, call_module)) and \
-           not os.path.exists(os.path.join(target_dir, call_module + ".py")):
+                   not d.endswith(('.dist-info', '.libs', '.data', '.egg-info')):
+                    if os.path.exists(os.path.join(full, '__init__.py')) or \
+                       any(f.endswith('.py') for f in os.listdir(full)):
+                        found = full
+                        break
+                    # Search one level deeper (e.g. src/ layout)
+                    if d == 'src' and os.path.isdir(full):
+                        for sd in os.listdir(full):
+                            sfull = os.path.join(full, sd)
+                            if os.path.isdir(sfull) and not sd.startswith('.') and \
+                               (os.path.exists(os.path.join(sfull, '__init__.py')) or
+                                any(f.endswith('.py') for f in os.listdir(sfull))):
+                                found = sfull
+                                break
+                        if found:
+                            break
+            if found:
+                shutil.move(found, os.path.join(target_dir, call_module))
+        has_py = any(True for _, _, files in os.walk(target_dir)
+                     for f in files if f.endswith('.py'))
+        if not has_py:
             _stats["failed"] += 1
             logging.warning("Download failed for %s==%s", package_name, version)
 
@@ -462,9 +485,21 @@ if __name__ == '__main__':
     sub_graph = get_sub_graph(FDG, target_library)
     #获取所有的候选版本（含sub_graph可达依赖和直接声明依赖）
     all_packages = set(sub_graph) | set(target_proj_dependency.keys())
+    if os.path.exists(f"{version_path_prefix}library_version.json"):
+        with open(f"{version_path_prefix}library_version.json", "r") as f:
+            _cached_versions = json.load(f)
+    else:
+        _cached_versions = {}
     for i in all_packages:
         library_call_module = get_library_call_module(i)
-        compatible_versions = get_compatible_versions(i, python_version)
+        if i in _cached_versions and python_version in _cached_versions[i]:
+            compatible_versions = _cached_versions[i][python_version]
+            # Skip download loop if API extraction already succeeded
+            api_dir = f"{api_path_prefix}{i}/"
+            if os.path.isdir(api_dir) and any(f.endswith('.json') for f in os.listdir(api_dir)):
+                continue
+        else:
+            compatible_versions = get_compatible_versions(i, python_version)
         #print(compatible_versions)
         for j in compatible_versions:
             if not os.path.exists(f"{constraint_path_prefix}{i}/{i}{j}/{i}.json"):
@@ -485,7 +520,68 @@ if __name__ == '__main__':
             with open(tmp_path, "w") as f:
                 json.dump(data, f)
             os.replace(tmp_path, lv_path)
-    
+
+    # Discover transitive dependencies from all versions of all known libraries
+    # (cached per library_version.json state — only rescanned when lib list changes)
+    with open(f"{version_path_prefix}library_version.json", 'r') as file:
+        version_ls = json.load(file)
+    known_libs = set(all_packages)
+    discovery_cache = f"{version_path_prefix}discovery_cache.json"
+    lib_names_key = sorted(version_ls.keys())
+    discovered = set()
+    cache_hit = False
+    if os.path.exists(discovery_cache):
+        try:
+            with open(discovery_cache, 'r') as f:
+                cache = json.load(f)
+            if cache.get('lib_names') == lib_names_key:
+                discovered = set(cache.get('discovered', []))
+                cache_hit = True
+        except (json.JSONDecodeError, KeyError):
+            pass
+    if not cache_hit:
+        for lib in list(all_packages):
+            for ver in version_ls.get(lib, {}).get(python_version, []):
+                constraint = get_library_constraint_from_metadata(lib, ver, python_version)
+                for dep in constraint:
+                    if dep not in known_libs and dep not in discovered:
+                        discovered.add(dep)
+        cache = {'lib_names': lib_names_key, 'discovered': list(discovered)}
+        tmp_cache = discovery_cache + ".tmp"
+        with open(tmp_cache, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp_cache, discovery_cache)
+    # Download and register newly discovered libraries
+    for dep in discovered:
+        print(f"Discovered transitive dependency: {dep}")
+        compatible_versions = get_compatible_versions(dep, python_version)
+        # Check if this is a source-only or binary-only package
+        pypi_url = f'https://pypi.org/pypi/{dep}/json'
+        has_sdist = False
+        try:
+            r = requests.get(pypi_url, timeout=30)
+            if r.status_code == 200:
+                urls = r.json().get('urls', [])
+                has_sdist = any(u.get('packagetype') == 'sdist' for u in urls)
+        except requests.RequestException:
+            pass
+        if has_sdist:
+            for ver in compatible_versions:
+                if not os.path.exists(f"{constraint_path_prefix}{dep}/{dep}{ver}/{dep}.json"):
+                    download_from_data(dep, ver)
+                download_pypi_source(dep, ver, python_version)
+            with open(f"{version_path_prefix}library_version.json", "r") as f:
+                data = json.load(f)
+            data[dep] = {python_version: compatible_versions}
+            lv_path = f"{version_path_prefix}library_version.json"
+            tmp_path = lv_path + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp_path, lv_path)
+            all_packages.add(dep)
+        else:
+            print(f"  Skipping {dep} (binary-only, no source distribution)")
+
     available_version = get_available_version(FDG, sub_graph, python_version, target_proj_dependency, target_library, target_version)
     available_version[target_library].append(start_version)
     #补全target_proj_dependency中未被sub_graph覆盖的孤立包
@@ -497,9 +593,16 @@ if __name__ == '__main__':
                 available_version[pkg] = version_ls[pkg][python_version]
             except KeyError:
                 pass
+    #补全新发现的传递依赖
+    for dep in discovered:
+        if dep not in available_version:
+            try:
+                available_version[dep] = version_ls[dep][python_version]
+            except KeyError:
+                pass
     #print(available_version)
-    
-    all_library = list(target_proj_dependency.keys())
+
+    all_library = list(target_proj_dependency.keys()) + [d for d in discovered if d in all_packages]
     #print(all_library)
     for lib in all_library:
         if not os.path.exists(f"{api_path_prefix}{lib}/"):
@@ -512,7 +615,7 @@ if __name__ == '__main__':
                 tasks.append((lib, version))
     #print(tasks)
     sys.setrecursionlimit(5000)
-    cleanup_temp_files(clear_cache=True)
+    cleanup_temp_files()
     with Pool(processes=min(20, cpu_count())) as pool:
         pool.map(task, tasks)
 
