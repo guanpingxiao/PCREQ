@@ -512,7 +512,7 @@ if __name__ == '__main__':
                 tasks.append((lib, version))
     #print(tasks)
     sys.setrecursionlimit(5000)
-    cleanup_temp_files()
+    cleanup_temp_files(clear_cache=True)
     with Pool(processes=min(20, cpu_count())) as pool:
         pool.map(task, tasks)
 

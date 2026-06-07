@@ -1,4 +1,4 @@
-import os, re, ast, platform, json, logging
+import os, re, ast, platform, json, logging, shutil
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 from packaging import version
@@ -362,9 +362,13 @@ def update_project_dependencies(target_proj_dependency, res):
             target_proj_dependency[pkg] = ver
     return target_proj_dependency
 
-def cleanup_temp_files():
+def cleanup_temp_files(clear_cache=False):
     if os.path.exists("./extraction/tmp.json"):
         os.remove("./extraction/tmp.json")
+    if clear_cache:
+        cache_dir = "./extraction/cache"
+        if os.path.exists(cache_dir):
+            shutil.rmtree(cache_dir)
 
 def get_library_paths(library_path_prefix, target_library, version, call_module):
     return f"{library_path_prefix}{target_library}/{target_library}{version}/{call_module}"
