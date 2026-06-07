@@ -341,7 +341,7 @@ def get_all_used_api(data_dir, package_name):
     else:
         result = _extract_api_data(data_dir)
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-        tmp_file = cache_file + ".tmp"
+        tmp_file = f"{cache_file}.{os.getpid()}.tmp"
         with open(tmp_file, "w") as f:
             json.dump(result, f)
         os.replace(tmp_file, cache_file)
