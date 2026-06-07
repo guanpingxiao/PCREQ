@@ -470,22 +470,31 @@ def code2flow(raw_source_paths, output_file, language=None, hide_legend=True,
                                            skip_parse_errors, lang_params, entry_functions)
 
     if isinstance(output_file, str):
-        with open(output_file, 'w') as fh:
-            as_json = output_ext == 'json'
+        pid = os.getpid()
+        as_json = output_ext == 'json'
+
+        tmp_file = f"{output_file}.{pid}.tmp"
+        with open(tmp_file, 'w') as fh:
             write_file(fh, nodes=all_nodes, edges=edges,
                        groups=file_groups, hide_legend=hide_legend,
                        no_grouping=no_grouping, as_json=as_json)
+        os.replace(tmp_file, output_file)
 
         additional_outside_output_file = output_file[:-5] + "-outside" + r".json"
-        with open(additional_outside_output_file, 'w') as fh:
+        tmp_outside = f"{additional_outside_output_file}.{pid}.tmp"
+        with open(tmp_outside, 'w') as fh:
             write_additional_outside_output_file(fh, nodes=all_nodes, edges=edges,
                        groups=file_groups, hide_legend=hide_legend,
                        no_grouping=no_grouping, as_json=as_json)
+        os.replace(tmp_outside, additional_outside_output_file)
+
         additional_entry_output_file = output_file[:-5] + "-entry" + r".json"
-        with open(additional_entry_output_file, 'w') as fh:
+        tmp_entry = f"{additional_entry_output_file}.{pid}.tmp"
+        with open(tmp_entry, 'w') as fh:
             write_additional_entry_output_file(found_entry_func_list, fh, nodes=all_nodes, edges=edges,
                        groups=file_groups, hide_legend=hide_legend,
                        no_grouping=no_grouping, as_json=as_json)
+        os.replace(tmp_entry, additional_entry_output_file)
 
     else:
         write_file(output_file, nodes=all_nodes, edges=edges,
