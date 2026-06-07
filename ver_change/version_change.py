@@ -105,6 +105,8 @@ def resolve_conflict(start_proj_dependency, target_proj_dependency, sub_graph, c
 
                             res = solving_constraints(compatibility_dict, new_available_versions)
                             #print(res)
+                            if res is None:
+                                continue
                             #更新requirements
                             for i in res:
                                 if res[i] != target_proj_dependency[i]:
