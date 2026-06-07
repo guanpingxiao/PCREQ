@@ -73,9 +73,17 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
                         break
             except:
                 print(proj_dependency)
-            if target_proj_dependency[proj_dependency] in condidate_version:  #将起始requirements.txt中的约束版本放在第一个，模拟pip安装
-                condidate_version.remove(target_proj_dependency[proj_dependency])
-                condidate_version.append(target_proj_dependency[proj_dependency])
+            #将起始requirements.txt中的约束版本放在第一个，模拟pip安装
+            target_ver = target_proj_dependency[proj_dependency]
+            target_ver_norm = str(parse_version(target_ver))
+            match_idx = None
+            for idx, v in enumerate(condidate_version):
+                if str(parse_version(v)) == target_ver_norm:
+                    match_idx = idx
+                    break
+            if match_idx is not None:
+                condidate_version.pop(match_idx)
+                condidate_version.append(target_ver)
                 flag = True
             #print(proj_dependency, condidate_version)
         if flag:
