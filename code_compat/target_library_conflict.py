@@ -467,13 +467,13 @@ def full_CG(s, proj_path, target_project, target_library, start_version, target_
         if ls == "":
             input1 = {}
             input2 = []
-            with open('./data/call_graph/' + target_project + "-" + target_library + start_version + '-outside.json', 'w') as file:
+            with open('./data/call_graph/' + target_project + "-" + target_library + start_version + "-" + target_version + '-outside.json', 'w') as file:
                 json.dump(input1, file)
-            with open('./data/call_graph/' + target_project + "-" + target_library + start_version + '-entry.json', 'w') as file:
+            with open('./data/call_graph/' + target_project + "-" + target_library + start_version + "-" + target_version + '-entry.json', 'w') as file:
                 json.dump(input2, file)
         else:
             if os.path.exists(start_library_path):
-                partc = [start_library_path, "--language", "py", "--output", "data/call_graph/" + proj + "-" + target_library + start_version + ".json", "--entry-functions", ls]
+                partc = [start_library_path, "--language", "py", "--output", "data/call_graph/" + proj + "-" + target_library + start_version + "-" + target_version + ".json", "--entry-functions", ls]
                 #print(f"**************************")
             else:
                 split_path = start_library_path.split('/')
@@ -481,10 +481,10 @@ def full_CG(s, proj_path, target_project, target_library, start_version, target_
 
                 # 去除最后两个部分
                 result = '/'.join(split_path[:-2])
-                partc = [result, "--language", "py", "--output", "data/call_graph/" + proj + "-" + target_library + start_version + ".json", "--entry-functions", ls]
+                partc = [result, "--language", "py", "--output", "data/call_graph/" + proj + "-" + target_library + start_version + "-" + target_version + ".json", "--entry-functions", ls]
             cfmain(sys_argv=partc, if_add_package_name = True)
         #提取项目调用的API的全名
-        with open('./data/call_graph/' + target_project + "-" + target_library + start_version + '-entry.json', 'r') as file:
+        with open('./data/call_graph/' + target_project + "-" + target_library + start_version + "-" + target_version + '-entry.json', 'r') as file:
             apis_full_name = json.load(file)
         api_to_examine = s.copy()
     #logging.info(f"**{apis_full_name}******************")
