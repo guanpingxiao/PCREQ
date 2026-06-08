@@ -252,6 +252,23 @@ def _extract_archive(archive_path, target_dir):
         for item in items:
             shutil.move(os.path.join(extract_tmp, item), os.path.join(target_dir, item))
 
+def _write_library_version(pkg, python_version, compatible_versions):
+    """Atomically update library_version.json with compatible_versions for pkg."""
+    lv_path = f"{version_path_prefix}library_version.json"
+    if os.path.exists(lv_path):
+        with open(lv_path, "r") as f:
+            data = json.load(f)
+    else:
+        data = {}
+    if pkg not in data:
+        data[pkg] = {}
+    data[pkg][python_version] = compatible_versions
+    tmp_path = lv_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp_path, lv_path)
+
+
 def download_pypi_source(package_name, version = None, python_version = "3.7", output_dir = "."):
     target_dir = f"{library_path_prefix}{package_name}/{package_name}{version}"
     call_module = get_library_call_module(package_name)
@@ -523,9 +540,25 @@ if __name__ == '__main__':
         library_call_module = get_library_call_module(i)
         if i in _cached_versions and python_version in _cached_versions[i]:
             compatible_versions = _cached_versions[i][python_version]
-            # Skip download loop if API extraction already succeeded
+            # Skip download loop if API extraction already succeeded,
+            # but still refresh the version list from PyPI in case new
+            # versions appeared (e.g. pre-releases were previously filtered).
             api_dir = f"{api_path_prefix}{i}/"
             if os.path.isdir(api_dir) and any(f.endswith('.json') for f in os.listdir(api_dir)):
+                fresh = get_compatible_versions(i, python_version)
+                if len(fresh) > len(compatible_versions):
+                    compatible_versions = fresh
+                    # Download only newly appearing versions
+                    old_set = set(_cached_versions[i][python_version])
+                    for j in fresh:
+                        if j in old_set:
+                            continue
+                        if not os.path.exists(f"{constraint_path_prefix}{i}/{i}{j}/{i}.json"):
+                            download_from_data(i, j)
+                        print(f"Downloading {i}{j}")
+                        download_pypi_source(i, j, python_version)
+                if len(fresh) != len(_cached_versions[i][python_version]):
+                    _write_library_version(i, python_version, compatible_versions)
                 continue
         else:
             compatible_versions = get_compatible_versions(i, python_version)
@@ -535,20 +568,7 @@ if __name__ == '__main__':
                 download_from_data(i, j)
             print(f"Downloading {i}{j}")
             download_pypi_source(i, j, python_version)
-        if not os.path.exists(f"{version_path_prefix}library_version.json"):
-            data = {}
-        else:
-            with open(f"{version_path_prefix}library_version.json", "r") as f:
-                data = json.load(f)
-        if i not in data:
-            data[i] = {}
-        if python_version not in data[i]:
-            data[i][python_version] = compatible_versions
-            lv_path = f"{version_path_prefix}library_version.json"
-            tmp_path = lv_path + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(data, f)
-            os.replace(tmp_path, lv_path)
+        _write_library_version(i, python_version, compatible_versions)
 
     # Discover transitive dependencies from all versions of all known libraries
     # (cached per library_version.json state — only rescanned when lib list changes)
