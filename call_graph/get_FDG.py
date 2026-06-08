@@ -51,7 +51,7 @@ def split_packname_and_cons(line):
     else:
         res.append(line)
     for i in range(len(res)):
-        res[i]=res[i].replace(" ","")
+        res[i]=res[i].replace(" ","").split('[')[0]
     return res
 
 def remove_parentheses_from_end(elements):

@@ -131,14 +131,15 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
     return available_versions
 
 def filter_versions(version_list):
-    return [v for v in version_list if not re.search(r'[a-zA-Z]', v)]
-
-def _is_valid_version(v):
-    try:
-        parse_version(v)
-        return True
-    except Exception:
-        return False
+    """Remove versions that fail parse_version (e.g. date-like strings like 2019.12.17)."""
+    result = []
+    for v in version_list:
+        try:
+            parse_version(v)
+            result.append(v)
+        except Exception:
+            pass
+    return result
 
 def get_compatible_versions(package_name, python_version):
     url = f"https://pypi.org/pypi/{package_name}/json"
@@ -172,7 +173,6 @@ def get_compatible_versions(package_name, python_version):
                 except (KeyError, TypeError, InvalidSpecifier):
                     pass
     compatible_versions = filter_versions(compatible_versions)
-    compatible_versions = [v for v in compatible_versions if _is_valid_version(v)]
     compatible_versions.sort(key=parse_version)
     if package_name == "torchvision" and "0.11.0" in compatible_versions:
         compatible_versions.remove("0.11.0")
@@ -268,6 +268,9 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
             shutil.rmtree(target_dir)
     # remove stale empty/incomplete directory
     if os.path.exists(target_dir):
+        if any(f.endswith('.py') for _, _, files in os.walk(target_dir) for f in files):
+            _stats["skipped"] += 1
+            return
         shutil.rmtree(target_dir)
 
     with tempfile.TemporaryDirectory() as tmpdir:

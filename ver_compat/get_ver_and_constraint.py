@@ -142,14 +142,13 @@ def get_new_lib(target_proj_dependency, python_version):
         constraint = get_library_constraint_from_metadata(library, target_proj_dependency[library], python_version)
         #print(constraint)
         for l in constraint:
-            base_l = l.split('[')[0]
-            if base_l not in target_proj_dependency.keys() and base_l not in new_lib_and_available_version.keys():
+            if l not in target_proj_dependency.keys() and l not in new_lib_and_available_version.keys():
                 with open(f"{version_path_prefix}/library_version.json", 'r') as file:
                     version_ls = json.load(file)
                 tmp = []
                 try:
                     flag = False
-                    for v in version_ls[base_l][python_version]:
+                    for v in version_ls[l][python_version]:
                         if constraint[l] is not None and (">" in constraint[l] or "~" in constraint[l]):
                             if is_version_compat(v, constraint[l]):
                                 tmp.append(v)
@@ -160,7 +159,7 @@ def get_new_lib(target_proj_dependency, python_version):
                     continue
                 if flag == False:
                     tmp = list(reversed(tmp))
-                new_lib_and_available_version[base_l] = tmp
+                new_lib_and_available_version[l] = tmp
     if "keras-nightly" in new_lib_and_available_version.keys():
         new_lib_and_available_version.pop("keras-nightly")
     return new_lib_and_available_version
