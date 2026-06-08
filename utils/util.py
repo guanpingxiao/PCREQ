@@ -1,5 +1,5 @@
 import os, re, ast, platform, json, logging, shutil
-from packaging.specifiers import SpecifierSet
+from packaging.specifiers import SpecifierSet, InvalidSpecifier
 from packaging.version import Version
 from packaging import version
 from queue import Queue
@@ -42,21 +42,18 @@ def find_requirements_path(dir_path):
     return None
 
 def is_version_compat(proj_cons, lib_cons):
-    # 创建一个 SpecifierSet，表示兼容版本范围
-    new_lib_cons = re.sub(r'[a-zA-Z]', '', lib_cons)
-    new_lib_cons = new_lib_cons.replace('*', '0')
-    new_lib_cons = new_lib_cons.replace('\'', '')
-    new_proj_cons = re.sub(r'[a-zA-Z]', '', proj_cons)
-    if new_lib_cons.endswith('.'):
-        new_lib_cons = new_lib_cons[:-1]
-    new_lib_cons = re.sub(r'(\d[\d\.]*)(?=(<|>|=))', r'\1,', new_lib_cons)
-    #print(new_lib_cons, lib_cons)
-    compatible_versions = SpecifierSet(new_lib_cons)
-
-    if new_proj_cons in compatible_versions:
-        return True
-    else:
-        return False
+    try:
+        return proj_cons in SpecifierSet(lib_cons)
+    except InvalidSpecifier:
+        # Non-PEP-440 constraint (e.g., pytz >=2011k, >=1.0<2.0),
+        # fall back to original regex cleaning for compatibility
+        new_lib_cons = re.sub(r'[a-zA-Z]', '', lib_cons)
+        new_lib_cons = new_lib_cons.replace('*', '0').replace('\'', '')
+        new_proj_cons = re.sub(r'[a-zA-Z]', '', proj_cons)
+        if new_lib_cons.endswith('.'):
+            new_lib_cons = new_lib_cons[:-1]
+        new_lib_cons = re.sub(r'(\d[\d\.]*)(?=(<|>|=))', r'\1,', new_lib_cons)
+        return new_proj_cons in SpecifierSet(new_lib_cons)
 
 def compare_version(version1, version2):
     v1 = version.parse(version1)

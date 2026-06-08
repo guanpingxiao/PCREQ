@@ -4,8 +4,7 @@ import os
 import ast, re
 import time
 import platform
-from packaging.specifiers import SpecifierSet
-from packaging.version import Version
+from utils.util import is_version_compat
 
 if (platform.system() == 'Windows'):
     slash = "\\"
@@ -57,15 +56,6 @@ def split_packname_and_cons(line):
 def remove_parentheses_from_end(elements):
     # 使用列表推导式处理每个元素
     return [element.rstrip('()') for element in elements]
-
-def is_version_compat(proj_cons, lib_cons):
-    # 创建一个 SpecifierSet，表示兼容版本范围
-    compatible_versions = SpecifierSet(lib_cons)
-
-    if proj_cons in compatible_versions:
-        return True
-    else:
-        return False
 
 def download_json(url, filename):
     # 发送 HTTP GET 请求，网络错误时重试3次
