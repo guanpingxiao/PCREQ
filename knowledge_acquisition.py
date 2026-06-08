@@ -255,6 +255,9 @@ def _extract_archive(archive_path, target_dir):
 def download_pypi_source(package_name, version = None, python_version = "3.7", output_dir = "."):
     target_dir = f"{library_path_prefix}{package_name}/{package_name}{version}"
     call_module = get_library_call_module(package_name)
+    if os.path.exists(target_dir + ".no_source"):
+        _stats["skipped"] += 1
+        return
     call_path = os.path.join(target_dir, call_module)
     if os.path.exists(call_path) or os.path.exists(call_path + ".py"):
         # Verify integrity: must have at least one .py file
@@ -301,7 +304,16 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                             if os.path.exists(target_dir):
                                 shutil.rmtree(target_dir)
                             os.replace(extract_tmp, target_dir)
-                            _stats["downloaded"] += 1
+                            if any(f.endswith('.py') for _, _, files in os.walk(target_dir)
+                                   for f in files):
+                                _stats["downloaded"] += 1
+                            else:
+                                with open(target_dir + ".no_source", "w") as _:
+                                    pass
+                                _stats["failed"] += 1
+                                shutil.rmtree(target_dir)
+                                logging.warning("No source files in %s==%s, skipping",
+                                                package_name, version)
                             break
                     except requests.ConnectionError as e:
                         if attempt < 2:
@@ -347,6 +359,16 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                             if os.path.exists(target_dir):
                                 shutil.rmtree(target_dir)
                             os.replace(extract_tmp, target_dir)
+                            if any(f.endswith('.py') for _, _, files in os.walk(target_dir)
+                                   for f in files):
+                                _stats["downloaded"] += 1
+                            else:
+                                with open(target_dir + ".no_source", "w") as _:
+                                    pass
+                                _stats["failed"] += 1
+                                shutil.rmtree(target_dir)
+                                logging.warning("No source files in %s==%s, skipping",
+                                                package_name, version)
             except requests.RequestException:
                 pass
 
