@@ -142,10 +142,14 @@ def _is_valid_version(v):
 
 def get_compatible_versions(package_name, python_version):
     url = f"https://pypi.org/pypi/{package_name}/json"
-    response = requests.get(url).json()
+    try:
+        response = requests.get(url).json()
+    except (requests.RequestException, json.JSONDecodeError, ValueError):
+        return []
     compatible_versions = []
     new_python_version = python_version.replace(".", "")
-    
+    if "releases" not in response:
+        return []
     for version, files in response["releases"].items():
         for file_info in files:
             if file_info.get("python_version"):
@@ -534,7 +538,8 @@ if __name__ == '__main__':
         try:
             with open(discovery_cache, 'r') as f:
                 cache = json.load(f)
-            if cache.get('lib_names') == lib_names_key:
+            if (cache.get('lib_names') == lib_names_key and
+                    cache.get('python_version') == python_version):
                 discovered = set(cache.get('discovered', []))
                 cache_hit = True
         except (json.JSONDecodeError, KeyError):
@@ -544,9 +549,11 @@ if __name__ == '__main__':
             for ver in version_ls.get(lib, {}).get(python_version, []):
                 constraint = get_library_constraint_from_metadata(lib, ver, python_version)
                 for dep in constraint:
-                    if dep not in known_libs and dep not in discovered:
-                        discovered.add(dep)
-        cache = {'lib_names': lib_names_key, 'discovered': list(discovered)}
+                    base_dep = dep.split('[')[0]
+                    if base_dep not in known_libs and base_dep not in discovered:
+                        discovered.add(base_dep)
+        cache = {'lib_names': lib_names_key, 'python_version': python_version,
+                 'discovered': list(discovered)}
         tmp_cache = discovery_cache + ".tmp"
         with open(tmp_cache, "w") as f:
             json.dump(cache, f)

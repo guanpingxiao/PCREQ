@@ -73,6 +73,7 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
                         break
             except:
                 print(proj_dependency)
+                continue
             #将起始requirements.txt中的约束版本放在第一个，模拟pip安装
             target_ver = target_proj_dependency[proj_dependency]
             target_ver_norm = str(parse_version(target_ver))
@@ -116,7 +117,7 @@ def get_compatibility_dict(available_versions, python_version):
             else:
                 for l in constraint:
                     #print(f"{library}-{version}, {l}, {constraint[l]}")
-                    if l in available_versions.keys():                        
+                    if l in available_versions.keys() and python_version in version_ls.get(l, {}):                        
                         if constraint[l] is not None and constraint[l] != "none":
                             for v in version_ls[l][python_version]:
                                 v_norm = str(parse_version(v))
@@ -141,13 +142,14 @@ def get_new_lib(target_proj_dependency, python_version):
         constraint = get_library_constraint_from_metadata(library, target_proj_dependency[library], python_version)
         #print(constraint)
         for l in constraint:
-            if l not in target_proj_dependency.keys() and l not in new_lib_and_available_version.keys():
+            base_l = l.split('[')[0]
+            if base_l not in target_proj_dependency.keys() and base_l not in new_lib_and_available_version.keys():
                 with open(f"{version_path_prefix}/library_version.json", 'r') as file:
                     version_ls = json.load(file)
                 tmp = []
                 try:
                     flag = False
-                    for v in version_ls[l][python_version]:
+                    for v in version_ls[base_l][python_version]:
                         if constraint[l] is not None and (">" in constraint[l] or "~" in constraint[l]):
                             if is_version_compat(v, constraint[l]):
                                 tmp.append(v)
@@ -157,8 +159,8 @@ def get_new_lib(target_proj_dependency, python_version):
                 except:
                     continue
                 if flag == False:
-                    tmp = list(reversed(tmp)) 
-                new_lib_and_available_version[l] = tmp
+                    tmp = list(reversed(tmp))
+                new_lib_and_available_version[base_l] = tmp
     if "keras-nightly" in new_lib_and_available_version.keys():
         new_lib_and_available_version.pop("keras-nightly")
     return new_lib_and_available_version
