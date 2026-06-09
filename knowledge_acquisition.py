@@ -232,6 +232,15 @@ def _select_download_urls(package_name, version, python_version):
     urls = data.get("urls", [])
     if not urls:
         return []
+    # Determine current platform tag for same-tier sorting
+    if sys.platform.startswith("linux"):
+        plat_tag = "manylinux"
+    elif sys.platform == "darwin":
+        plat_tag = "macosx"
+    elif sys.platform == "win32":
+        plat_tag = "win"
+    else:
+        plat_tag = None
     scored = []
     for u in urls:
         pkg_type = u.get("packagetype")
@@ -239,7 +248,19 @@ def _select_download_urls(package_name, version, python_version):
         url = u.get("url", "")
         if not url:
             continue
-        priority, is_pure = _parse_wheel_tag(filename) if pkg_type == "bdist_wheel" else (4, True)
+        # Skip non-source artifacts: .exe, .msi, .dmg, .rpm, .deb
+        if filename.endswith((".exe", ".msi", ".dmg", ".rpm", ".deb")):
+            continue
+        if pkg_type == "bdist_wheel":
+            priority, is_pure = _parse_wheel_tag(filename)
+            if is_pure and priority < 4:
+                platform_ok = ("any" in filename) or (plat_tag and plat_tag in filename)
+                if not platform_ok:
+                    priority = 5  # below sdist (4)
+        elif pkg_type == "sdist":
+            priority, is_pure = 4, True
+        else:
+            continue  # unknown artifact type, skip
         if priority < 0:
             continue  # compiled wheel, skip
         scored.append((priority, url))
@@ -285,8 +306,10 @@ def _resolve_module_path(name, extract_root):
     Returns the subdirectory path or None if not found."""
     # Direct match
     dir_path = os.path.join(extract_root, name)
-    if os.path.isdir(dir_path) or os.path.isfile(dir_path + ".py"):
-        return os.path.join(extract_root, name)
+    if os.path.isdir(dir_path):
+        return dir_path
+    if os.path.isfile(dir_path + ".py"):
+        return dir_path + ".py"
     # Search one level deep
     for d in os.listdir(extract_root):
         full = os.path.join(extract_root, d)
@@ -380,10 +403,32 @@ def _write_marker(path):
         pass
 
 
-def _finish_identify(module_name, package_name, target_dir):
-    """Write .call_module, update cache, remove .call_module_failed."""
+def _finish_identify(module_name, package_name, target_dir, extract_root=None):
+    """Write .call_module, update cache, remove .call_module_failed.
+
+    If extract_root is given, moves the module directory from extract_root to
+    target_dir/{module_name}/ so main.py can find it at the expected path.
+    """
     call_module_file = os.path.join(target_dir, ".call_module")
     call_module_failed = os.path.join(target_dir, ".call_module_failed")
+
+    # Move module from extract_root to target_dir
+    if extract_root is not None:
+        module_path = _resolve_module_path(module_name, extract_root)
+        if module_path is None:
+            return None
+        if os.path.isfile(module_path) and module_path.endswith(".py"):
+            # Single-file module: move to {target_dir}/{name}.py
+            dest = os.path.join(target_dir, module_name + ".py")
+            if os.path.exists(dest):
+                os.remove(dest)
+            shutil.move(module_path, dest)
+        else:
+            dest = os.path.join(target_dir, module_name)
+            if os.path.exists(dest):
+                shutil.rmtree(dest)
+            shutil.move(module_path, dest)
+
     with open(call_module_file, "w") as f:
         f.write(module_name)
     if os.path.exists(call_module_failed):
@@ -428,19 +473,19 @@ def _identify_call_module(package_name, target_dir, is_wheel=False, extract_root
                     if entries:
                         selected = _select_from_top_level(entries, package_name, extract_root)
                         if selected and _verify_top_level(selected, extract_root):
-                            return _finish_identify(selected, package_name, target_dir)
+                            return _finish_identify(selected, package_name, target_dir, extract_root)
                     break
 
     # Step 2: call_module_map.json
     module_from_map = _lookup_call_module(package_name)
     if module_from_map != package_name:
         if _verify_top_level(module_from_map, extract_root):
-            return _finish_identify(module_from_map, package_name, target_dir)
+            return _finish_identify(module_from_map, package_name, target_dir, extract_root)
 
     # Step 3: setup.cfg
     module_from_cfg = _parse_setup_cfg(extract_root)
     if module_from_cfg and _verify_top_level(module_from_cfg, extract_root):
-        return _finish_identify(module_from_cfg, package_name, target_dir)
+        return _finish_identify(module_from_cfg, package_name, target_dir, extract_root)
 
     # Step 4: heuristic scoring (root + one level deep for src/ layout)
     scored = []
@@ -467,7 +512,18 @@ def _identify_call_module(package_name, target_dir, is_wheel=False, extract_root
         scored.sort(reverse=True)
         best_score, best_dir = scored[0]
         if best_score >= 3:
-            return _finish_identify(best_dir, package_name, target_dir)
+            return _finish_identify(best_dir, package_name, target_dir, extract_root)
+
+    # Step 4b: single-file module fallback (e.g. six.py)
+    norm = package_name.replace("-", "_")
+    for d in os.listdir(extract_root):
+        if d.startswith("."):
+            continue
+        full = os.path.join(extract_root, d)
+        if os.path.isfile(full) and d.endswith(".py"):
+            mod_name = d[:-3]
+            if mod_name == norm or mod_name == package_name:
+                return _finish_identify(mod_name, package_name, target_dir, extract_root)
 
     # All failed
     _write_marker(call_module_failed)
@@ -487,9 +543,15 @@ def _extract_archive(archive_path, target_dir):
     # Fix zero-permission entries (e.g., old colorama 0.1.x tar has mode 0o0)
     for root, dirs, files in os.walk(extract_tmp):
         for d in dirs:
-            os.chmod(os.path.join(root, d), 0o755)
+            try:
+                os.chmod(os.path.join(root, d), 0o755)
+            except OSError:
+                pass
         for f in files:
-            os.chmod(os.path.join(root, f), 0o644)
+            try:
+                os.chmod(os.path.join(root, f), 0o644)
+            except OSError:
+                pass
     items = os.listdir(extract_tmp)
     os.makedirs(target_dir, exist_ok=True)
     if len(items) == 1 and os.path.isdir(os.path.join(extract_tmp, items[0])):
@@ -519,186 +581,188 @@ def _write_library_version(pkg, python_version, compatible_versions):
 
 def download_pypi_source(package_name, version = None, python_version = "3.7", output_dir = "."):
     target_dir = f"{library_path_prefix}{package_name}/{package_name}{version}"
-    call_module = get_library_call_module(package_name)
-    if os.path.exists(target_dir + ".no_source"):
-        _stats["skipped"] += 1
-        return
-    call_path = os.path.join(target_dir, call_module)
-    if os.path.exists(call_path) or os.path.exists(call_path + ".py"):
-        # Verify integrity: must have at least one .py file
+
+    # Gate 1: already identified
+    call_module_file = os.path.join(target_dir, ".call_module")
+    if os.path.exists(call_module_file):
         try:
-            if os.path.isdir(call_path) and not any(f.endswith('.py') for f in os.listdir(call_path)):
-                shutil.rmtree(target_dir)
-            elif os.path.isdir(call_path) or os.path.exists(call_path + ".py"):
+            with open(call_module_file) as f:
+                cached = f.read().strip()
+            dest = os.path.join(target_dir, cached)
+            if os.path.exists(dest) or os.path.exists(dest + ".py"):
                 _stats["skipped"] += 1
                 return
         except OSError:
-            shutil.rmtree(target_dir)
-    # remove stale empty/incomplete directory
-    if os.path.exists(target_dir):
-        if any(f.endswith('.py') for _, _, files in os.walk(target_dir) for f in files):
-            _stats["skipped"] += 1
-            return
-        shutil.rmtree(target_dir)
+            pass
+
+    # Gate 2: permanently broken (no source)
+    if os.path.exists(target_dir + ".no_source"):
+        _stats["skipped"] += 1
+        return
+
+    # Determine artifact type and download URL
+    os.makedirs(target_dir, exist_ok=True)
+    urls = _select_download_urls(package_name, version, python_version)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        urls = _select_download_urls(package_name, version, python_version)
+        artifact_path = None
+        is_wheel = False
+
+        # --- Download phase ---
         if urls:
-            for url in urls:
-                filename = os.path.basename(url.split("#")[0].split("?")[0])
-                path = os.path.join(tmpdir, filename)
-                for attempt in range(3):
-                    try:
-                        r = requests.get(url, timeout=1800, stream=True)
-                        if r.status_code == 200:
-                            expected_size = int(r.headers.get('Content-Length', 0))
-                            actual_size = 0
-                            with open(path, "wb") as f:
-                                for chunk in r.iter_content(chunk_size=8192):
-                                    f.write(chunk)
-                                    actual_size += len(chunk)
-                            if expected_size > 0 and actual_size != expected_size:
-                                logging.warning("Content-Length mismatch for %s: expected %d, got %d",
-                                                url[:80], expected_size, actual_size)
-                                # still accept the file — CDN proxies often report wrong size
-                            # Extract to tmp dir, then atomically rename
-                            extract_tmp = target_dir + ".tmp"
-                            if os.path.exists(extract_tmp):
-                                shutil.rmtree(extract_tmp)
-                            _extract_archive(path, extract_tmp)
-                            if os.path.exists(target_dir):
-                                shutil.rmtree(target_dir)
-                            os.replace(extract_tmp, target_dir)
-                            if any(f.endswith('.py') for _, _, files in os.walk(target_dir)
-                                   for f in files):
-                                _stats["downloaded"] += 1
-                            else:
-                                with open(target_dir + ".no_source", "w") as _:
-                                    pass
-                                _stats["failed"] += 1
-                                shutil.rmtree(target_dir)
-                                logging.warning("No source files in %s==%s, skipping",
-                                                package_name, version)
+            # Check if archive already saved
+            for u in urls:
+                fname = os.path.basename(u.split("#")[0].split("?")[0])
+                existing = os.path.join(target_dir, fname)
+                if os.path.exists(existing):
+                    artifact_path = existing
+                    is_wheel = fname.endswith(".whl")
+                    _stats["skipped"] += 1
+                    break
+            if artifact_path is None:
+                for url in urls:
+                    fname = os.path.basename(url.split("#")[0].split("?")[0])
+                    dl_path = os.path.join(tmpdir, fname)
+                    success = False
+                    for attempt in range(3):
+                        try:
+                            r = requests.get(url, timeout=7200, stream=True)
+                            if r.status_code == 200:
+                                expected_size = int(r.headers.get('Content-Length', 0))
+                                actual_size = 0
+                                with open(dl_path, "wb") as f:
+                                    for chunk in r.iter_content(chunk_size=8192):
+                                        f.write(chunk)
+                                        actual_size += len(chunk)
+                                if expected_size > 0 and actual_size != expected_size:
+                                    logging.warning("Content-Length mismatch for %s: expected %d, got %d",
+                                                    url[:80], expected_size, actual_size)
+                                # Save archive to target_dir
+                                saved = os.path.join(target_dir, fname)
+                                shutil.copy2(dl_path, saved)
+                                artifact_path = saved
+                                is_wheel = fname.endswith(".whl")
+                                success = True
+                                break
+                        except requests.ConnectionError as e:
+                            if attempt < 2:
+                                time.sleep(2 ** attempt)
+                                continue
+                            logging.warning("Download retry exhausted: %s", e)
+                        except OSError as e:
+                            logging.warning("Disk write error, skipping %s==%s: %s",
+                                          package_name, version, e)
                             break
-                    except requests.ConnectionError as e:
-                        if attempt < 2:
-                            time.sleep(2 ** attempt)
-                            continue
-                        logging.warning("Download retry exhausted: %s: %s", url[:80], e)
-                    except OSError as e:
-                        logging.warning("Disk write error, skipping %s==%s: %s", package_name, version, e)
+                    if success:
                         break
-                else:
-                    continue  # retry exhausted, try next URL
-                break  # success, stop URL iteration
         else:
-            # no constraint JSON available yet; download from pypi.org API directly
+            # Fallback: query PyPI API directly
             pypi_url = f"https://pypi.org/pypi/{package_name}/{version}/json"
             try:
-                r = requests.get(pypi_url, timeout=30)
+                r = requests.get(pypi_url, timeout=7200)
                 if r.status_code == 200:
                     data = r.json()
+                    # Sort by same priority: pure wheel > sdist > rest
+                    candidates = []
                     for u in data.get("urls", []):
-                        if u.get("packagetype") == "sdist":
-                            url = u["url"]
-                            break
-                    else:
-                        url = data["urls"][0]["url"] if data.get("urls") else None
+                        fname = u.get("filename", "")
+                        url = u.get("url", "")
+                        if not url or fname.endswith((".exe", ".msi", ".dmg")):
+                            continue
+                        pkg_type = u.get("packagetype", "")
+                        if pkg_type == "bdist_wheel":
+                            prio, pure = _parse_wheel_tag(fname)
+                            if prio > 0:
+                                candidates.append((prio, url, fname))
+                        elif pkg_type == "sdist":
+                            candidates.append((4, url, fname))
+                    candidates.sort(key=lambda x: x[0])
+                    url = candidates[0][1] if candidates else None
                     if url:
-                        path = os.path.join(tmpdir, os.path.basename(url.split("#")[0].split("?")[0]))
-                        r2 = requests.get(url, timeout=1800, stream=True)
+                        fname = os.path.basename(url.split("#")[0].split("?")[0])
+                        dl_path = os.path.join(tmpdir, fname)
+                        r2 = requests.get(url, timeout=7200, stream=True)
                         if r2.status_code == 200:
                             expected_size = int(r2.headers.get('Content-Length', 0))
                             actual_size = 0
-                            with open(path, "wb") as f:
+                            with open(dl_path, "wb") as f:
                                 for chunk in r2.iter_content(chunk_size=8192):
                                     f.write(chunk)
                                     actual_size += len(chunk)
                             if expected_size > 0 and actual_size != expected_size:
                                 logging.warning("Content-Length mismatch for %s: expected %d, got %d",
                                                 url[:80], expected_size, actual_size)
-                            extract_tmp = target_dir + ".tmp"
-                            if os.path.exists(extract_tmp):
-                                shutil.rmtree(extract_tmp)
-                            _extract_archive(path, extract_tmp)
-                            if os.path.exists(target_dir):
-                                shutil.rmtree(target_dir)
-                            os.replace(extract_tmp, target_dir)
-                            if any(f.endswith('.py') for _, _, files in os.walk(target_dir)
-                                   for f in files):
-                                _stats["downloaded"] += 1
-                            else:
-                                with open(target_dir + ".no_source", "w") as _:
-                                    pass
-                                _stats["failed"] += 1
-                                shutil.rmtree(target_dir)
-                                logging.warning("No source files in %s==%s, skipping",
-                                                package_name, version)
+                            saved = os.path.join(target_dir, fname)
+                            shutil.copy2(dl_path, saved)
+                            artifact_path = saved
+                            is_wheel = False
             except requests.RequestException:
                 pass
 
-    # Download failed, nothing to extract
-    if not os.path.exists(target_dir):
-        return
-
-    # handle src-layout: if call_module is nested (e.g., src/PIL), move to root
-    if not os.path.exists(os.path.join(target_dir, call_module)):
-        src_chk = os.path.join(target_dir, "src", call_module)
-        if os.path.isdir(src_chk):
-            shutil.move(src_chk, os.path.join(target_dir, call_module))
-        else:
-            for root, dirs, _ in os.walk(target_dir):
-                for d in dirs:
-                    if d == call_module:
-                        try:
-                            shutil.move(os.path.join(root, d), os.path.join(target_dir, d))
-                        except shutil.Error:
-                            pass  # destination already exists, call_module is in place
-                        break
-        # auto-detect: scan for package root when call_module not found
-        if not os.path.exists(os.path.join(target_dir, call_module)):
-            found = None
-            for d in sorted(os.listdir(target_dir)):
-                full = os.path.join(target_dir, d)
-                if os.path.isdir(full) and not d.startswith('.') and \
-                   not d.endswith(('.dist-info', '.libs', '.data', '.egg-info')):
-                    if os.path.exists(os.path.join(full, '__init__.py')) or \
-                       any(f.endswith('.py') for f in os.listdir(full)):
-                        found = full
-                        break
-                    # Search one level deeper (e.g. src/ layout)
-                    if d == 'src' and os.path.isdir(full):
-                        for sd in os.listdir(full):
-                            sfull = os.path.join(full, sd)
-                            if os.path.isdir(sfull) and not sd.startswith('.') and \
-                               (os.path.exists(os.path.join(sfull, '__init__.py')) or
-                                any(f.endswith('.py') for f in os.listdir(sfull))):
-                                found = sfull
-                                break
-                        if found:
-                            break
-            if found:
-                shutil.move(found, os.path.join(target_dir, call_module))
-        has_py = any(True for _, _, files in os.walk(target_dir)
-                     for f in files if f.endswith('.py'))
-        if not has_py:
+        if artifact_path is None:
             _stats["failed"] += 1
             logging.warning("Download failed for %s==%s", package_name, version)
+            return
 
-def extract_fine_grained_knowledge(lib, version):  
+        # --- Identification phase ---
+        extract_dir = os.path.join(tmpdir, "extract")
+        # Copy archive to tmpdir so _extract_archive's temp dir stays in tmpdir
+        tmp_archive = os.path.join(tmpdir, os.path.basename(artifact_path))
+        shutil.copy2(artifact_path, tmp_archive)
+        _extract_archive(tmp_archive, extract_dir)
+        if not any(f.endswith('.py') for _, _, files in os.walk(extract_dir)
+                   for f in files):
+            with open(target_dir + ".no_source", "w") as _:
+                pass
+            if os.path.exists(target_dir):
+                shutil.rmtree(target_dir)
+            _stats["failed"] += 1
+            logging.warning("No source files in %s==%s, skipping",
+                          package_name, version)
+            return
+
+        identified = _identify_call_module(package_name, target_dir,
+                                           is_wheel=is_wheel,
+                                           extract_root=extract_dir)
+        if identified is not None:
+            _stats["downloaded"] += 1
+        else:
+            _stats["failed"] += 1
+            logging.warning("call_module identification failed for %s==%s",
+                          package_name, version)
+
+def extract_fine_grained_knowledge(lib, version):
     library_call_module = get_library_call_module(lib)
     library_path = f"{library_path_prefix}{lib}/{lib}{version}/{library_call_module}"
-    res = extract_from_directory(library_path)
-    print("********************")
-    dir = get_python_modules_and_packages_from_dir(library_path, library_call_module)
-    init_dir = get_python_modules_and_packages_from_init(library_path, library_call_module)
-    dir.update(init_dir)
-    res["modules"] = list(dir)
-    try:
-        api_usage_in_target_library, _1, __2, _3  = get_all_used_api(library_path, library_call_module)
-    except (SyntaxError, ValueError, OSError):
-        api_usage_in_target_library = []
-    res["api_usage"] = list(api_usage_in_target_library)       
+    if os.path.isfile(library_path + ".py"):
+        # Single-file module (e.g. six.py)
+        from extraction.library_api_and_module import extract_info_from_py_file
+        root_dir = f"{library_path_prefix}{lib}/{lib}{version}"
+        res = extract_info_from_py_file(library_path + ".py", root_dir)
+        # Strip version-dir prefix from keys (extract_info_from_py_file prepends
+        # root_dir's basename, e.g. "six1.16.0.six.func" → "six.func")
+        version_dir = os.path.basename(root_dir.rstrip("/"))
+        version_prefix = version_dir + "."
+        for key_type in ("functions", "classes", "methods"):
+            new_dict = {}
+            for k, v in res[key_type].items():
+                new_k = k[len(version_prefix):] if k.startswith(version_prefix) else k
+                new_dict[new_k] = v
+            res[key_type] = new_dict
+        res["modules"] = [library_call_module]
+        res["api_usage"] = []
+    else:
+        res = extract_from_directory(library_path)
+        print("********************")
+        dir = get_python_modules_and_packages_from_dir(library_path, library_call_module)
+        init_dir = get_python_modules_and_packages_from_init(library_path, library_call_module)
+        dir.update(init_dir)
+        res["modules"] = list(dir)
+        try:
+            api_usage_in_target_library, _1, __2, _3  = get_all_used_api(library_path, library_call_module)
+        except (SyntaxError, ValueError, OSError):
+            api_usage_in_target_library = []
+        res["api_usage"] = list(api_usage_in_target_library)
     funcs = res["functions"]
     new_funcs = shortenPath(funcs, lib, version, library_path_prefix)
     res["functions"] = new_funcs
@@ -872,7 +936,7 @@ if __name__ == '__main__':
         pypi_url = f'https://pypi.org/pypi/{dep}/json'
         has_sdist = False
         try:
-            r = requests.get(pypi_url, timeout=30)
+            r = requests.get(pypi_url, timeout=7200)
             if r.status_code == 200:
                 urls = r.json().get('urls', [])
                 has_sdist = any(u.get('packagetype') == 'sdist' for u in urls)

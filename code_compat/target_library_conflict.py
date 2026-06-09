@@ -493,13 +493,29 @@ def full_CG(s, proj_path, target_project, target_library, start_version, target_
 
 def _extract_and_save_api(library_path, library_call_module, lib, version, json_file_path):
     """Extract API from source and save to JSON. Returns the result dict."""
-    res = extract_from_directory(library_path)
-    dir_ = get_python_modules_and_packages_from_dir(library_path, library_call_module)
-    init_dir = get_python_modules_and_packages_from_init(library_path, library_call_module)
-    dir_.update(init_dir)
-    res["modules"] = list(dir_)
-    api_usage_in_target_library, _1, __2, _3 = get_all_used_api(library_path, library_call_module)
-    res["api_usage"] = list(api_usage_in_target_library)
+    if os.path.isfile(library_path + ".py"):
+        from extraction.library_api_and_module import extract_info_from_py_file
+        root_dir = os.path.dirname(library_path)
+        res = extract_info_from_py_file(library_path + ".py", root_dir)
+        # Strip version-dir prefix (e.g. "six1.16.0.six.func" → "six.func")
+        version_dir = os.path.basename(root_dir.rstrip("/"))
+        version_prefix = version_dir + "."
+        for key_type in ("functions", "classes", "methods"):
+            new_dict = {}
+            for k, v in res[key_type].items():
+                new_k = k[len(version_prefix):] if k.startswith(version_prefix) else k
+                new_dict[new_k] = v
+            res[key_type] = new_dict
+        res["modules"] = [library_call_module]
+        res["api_usage"] = []
+    else:
+        res = extract_from_directory(library_path)
+        dir_ = get_python_modules_and_packages_from_dir(library_path, library_call_module)
+        init_dir = get_python_modules_and_packages_from_init(library_path, library_call_module)
+        dir_.update(init_dir)
+        res["modules"] = list(dir_)
+        api_usage_in_target_library, _1, __2, _3 = get_all_used_api(library_path, library_call_module)
+        res["api_usage"] = list(api_usage_in_target_library)
     funcs = res["functions"]
     new_funcs = shortenPath(funcs, lib, version, library_path_prefix)
     res["functions"] = new_funcs
@@ -545,7 +561,7 @@ def get_all_library_info(library_path, library_call_module, version, lib):
 
     # JSON missing → on-demand extraction
     if not os.path.exists(json_file_path):
-        if not os.path.exists(library_path):
+        if not os.path.exists(library_path) and not os.path.isfile(library_path + ".py"):
             _raise_call_module_error(lib, version, library_path)
         return _extract_and_save_api(library_path, library_call_module, lib, version, json_file_path)
 
@@ -555,7 +571,7 @@ def get_all_library_info(library_path, library_call_module, version, lib):
 
     # Empty modules → extraction was from wrong call_module → delete and try to rebuild
     if len(res.get("modules", [])) == 0:
-        if not os.path.exists(library_path):
+        if not os.path.exists(library_path) and not os.path.isfile(library_path + ".py"):
             _raise_call_module_error(lib, version, library_path)
         logging.warning("API JSON has empty modules for %s==%s, re-extracting...", lib, version)
         os.remove(json_file_path)
