@@ -491,6 +491,38 @@ def full_CG(s, proj_path, target_project, target_library, start_version, target_
     #logging.info(f"**{apis_full_name}******************")
     return apis_full_name, api_to_examine
 
+def _extract_and_save_api(library_path, library_call_module, lib, version, json_file_path):
+    """Extract API from source and save to JSON. Returns the result dict."""
+    res = extract_from_directory(library_path)
+    dir_ = get_python_modules_and_packages_from_dir(library_path, library_call_module)
+    init_dir = get_python_modules_and_packages_from_init(library_path, library_call_module)
+    dir_.update(init_dir)
+    res["modules"] = list(dir_)
+    api_usage_in_target_library, _1, __2, _3 = get_all_used_api(library_path, library_call_module)
+    res["api_usage"] = list(api_usage_in_target_library)
+    funcs = res["functions"]
+    new_funcs = shortenPath(funcs, lib, version, library_path_prefix)
+    res["functions"] = new_funcs
+    classes = res["classes"]
+    new_classes = shortenPath(classes, lib, version, library_path_prefix)
+    res["classes"] = new_classes
+    with open(json_file_path, "w") as f:
+        json.dump(res, f)
+    return res
+
+
+def _raise_call_module_error(lib, version, library_path):
+    raise FileNotFoundError(
+        f"Module source not found: {library_path}\n"
+        f"  call_module not identified for {lib}=={version}.\n"
+        f"  Fix:\n"
+        f"    1. Edit {version_path_prefix}call_module_map.json:\n"
+        f'       {{"{lib}": {{"module": "<correct_import_name>"}}}}\n'
+        f"    2. Delete .call_module_failed and re-run knowledge_acquisition.py\n"
+        f"       libraries/{lib}/{lib}{version}/.call_module_failed"
+    )
+
+
 def get_all_library_info(library_path, library_call_module, version, lib):
     version_norm = parse_version(version)
     json_file_path = None
@@ -510,24 +542,25 @@ def get_all_library_info(library_path, library_call_module, version, lib):
         json_file_path = f"{api_path_prefix}{lib}/{version}.json"
     if not os.path.exists(f"{api_path_prefix}{lib}"):
         os.makedirs(f"{api_path_prefix}{lib}")
+
+    # JSON missing → on-demand extraction
     if not os.path.exists(json_file_path):
-        res = extract_from_directory(library_path)
-        dir = get_python_modules_and_packages_from_dir(library_path, library_call_module)
-        init_dir = get_python_modules_and_packages_from_init(library_path, library_call_module)
-        dir.update(init_dir)
-        res["modules"] = list(dir)
-        api_usage_in_target_library, _1, __2, _3  = get_all_used_api(library_path, library_call_module)
-        res["api_usage"] = list(api_usage_in_target_library)
-        funcs = res["functions"]
-        new_funcs = shortenPath(funcs, lib, version, library_path_prefix)
-        res["functions"] = new_funcs
-        classes = res["classes"]
-        new_classes = shortenPath(classes, lib, version, library_path_prefix)
-        res["classes"] = new_classes
-        with open(json_file_path, "w") as f:
-            json.dump(res, f)
+        if not os.path.exists(library_path):
+            _raise_call_module_error(lib, version, library_path)
+        return _extract_and_save_api(library_path, library_call_module, lib, version, json_file_path)
+
+    # Read existing JSON
     with open(json_file_path, "r") as f:
         res = json.load(f)
+
+    # Empty modules → extraction was from wrong call_module → delete and try to rebuild
+    if len(res.get("modules", [])) == 0:
+        if not os.path.exists(library_path):
+            _raise_call_module_error(lib, version, library_path)
+        logging.warning("API JSON has empty modules for %s==%s, re-extracting...", lib, version)
+        os.remove(json_file_path)
+        return _extract_and_save_api(library_path, library_call_module, lib, version, json_file_path)
+
     return res
 
 def is_target_library_code_conflict(proj_path, target_project, target_library, start_version, target_version, start_library_path, target_library_path, target_library_call_module, proj, path, target_proj_dependency, python_version):
