@@ -8,6 +8,7 @@ from extraction.library_api_and_module import extract_from_directory
 from extraction.get_attribute_from_proj import get_attributes_from_file
 from call_graph.get_FDG import get_FDG_from_requirements
 from .params_compat import analyzeCompatibility
+from packaging.version import parse as parse_version
 import json, platform, time, re, ast, os, logging
 #from fuzzywuzzy import process
 from thefuzz import process
@@ -491,7 +492,22 @@ def full_CG(s, proj_path, target_project, target_library, start_version, target_
     return apis_full_name, api_to_examine
 
 def get_all_library_info(library_path, library_call_module, version, lib):
-    json_file_path = f"{api_path_prefix}{lib}/{version}.json"
+    version_norm = parse_version(version)
+    json_file_path = None
+    api_dir = f"{api_path_prefix}{lib}"
+    # Prefer existing file with matching normalized version (handles format mismatch
+    # between solver output e.g. 0.8.0rc4 and KB file e.g. 0.8.0.rc4.json)
+    if os.path.isdir(api_dir):
+        for fname in os.listdir(api_dir):
+            if fname.endswith('.json'):
+                try:
+                    if parse_version(fname[:-5]) == version_norm:
+                        json_file_path = os.path.join(api_dir, fname)
+                        break
+                except Exception:
+                    pass
+    if json_file_path is None:
+        json_file_path = f"{api_path_prefix}{lib}/{version}.json"
     if not os.path.exists(f"{api_path_prefix}{lib}"):
         os.makedirs(f"{api_path_prefix}{lib}")
     if not os.path.exists(json_file_path):
