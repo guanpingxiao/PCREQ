@@ -41,6 +41,8 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
             except:
                 print(proj_dependency.lower())
             #print(proj_dependency)
+            condidate_version = sorted(set(str(parse_version(v)) for v in condidate_version),
+                                   key=parse_version)
             if len(condidate_version) >= 30 and proj_dependency != "google-auth":
                 #print(proj_dependency)
                 condidate_version = condidate_version[-30:]
@@ -55,10 +57,10 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
                     break
             if match_idx is not None:
                 condidate_version.pop(match_idx)
-                condidate_version.append(target_ver)
+                condidate_version.append(target_ver_norm)
                 flag = True
             else:
-                condidate_version.append(target_ver)
+                condidate_version.append(target_ver_norm)
                 flag = True
             pass
             #condidate_version.append(target_proj_dependency[proj_dependency])
@@ -67,9 +69,9 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
                 for version in version_ls[proj_dependency][python_version]:
                     try:                    #在目标库起始版本的约束中，但是不在目标版本的约束中
                         if is_version_compat(version, target_library_constraint[proj_dependency]):
-                            condidate_version.append(version)
+                            condidate_version.append(str(parse_version(version)))
                     except:
-                        condidate_version = version_ls[proj_dependency][python_version]
+                        condidate_version = [str(parse_version(v)) for v in version_ls[proj_dependency][python_version]]
                         break
             except:
                 print(proj_dependency)
@@ -84,9 +86,8 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
                     break
             if match_idx is not None:
                 condidate_version.pop(match_idx)
-                condidate_version.append(target_ver)
+                condidate_version.append(target_ver_norm)
                 flag = True
-            #print(proj_dependency, condidate_version)
         if flag:
             available_versions1[proj_dependency] = condidate_version
         else:
@@ -121,12 +122,12 @@ def get_compatibility_dict(available_versions, python_version):
                         if constraint[l] is not None and constraint[l] != "none":
                             for v in version_ls[l][python_version]:
                                 if is_version_compat(v, constraint[l]):
-                                    a.append(l+'#'+v)
+                                    a.append(l+'#'+str(parse_version(v)))
                         else:
                             #a[l] = version_ls[l][python_version]
                             for v in version_ls[l][python_version]:
                                 #if l in available_versions.keys() and v in available_versions[l]:
-                                a.append(l+'#'+v)
+                                a.append(l+'#'+str(parse_version(v)))
                                     
                 res[version] = a
             
@@ -148,12 +149,16 @@ def get_new_lib(target_proj_dependency, python_version):
                 try:
                     flag = False
                     for v in version_ls[l][python_version]:
+                        try:
+                            v_norm = str(parse_version(v))
+                        except Exception:
+                            v_norm = v
                         if constraint[l] is not None and (">" in constraint[l] or "~" in constraint[l]):
-                            if is_version_compat(v, constraint[l]):
-                                tmp.append(v)
+                            if is_version_compat(v_norm, constraint[l]):
+                                tmp.append(v_norm)
                         else:
                             flag = True
-                            tmp.append(v)
+                            tmp.append(v_norm)
                 except:
                     continue
                 if flag == False:
