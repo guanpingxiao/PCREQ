@@ -506,6 +506,10 @@ def _extract_and_save_api(library_path, library_call_module, lib, version, json_
                 new_k = k[len(version_prefix):] if k.startswith(version_prefix) else k
                 new_dict[new_k] = v
             res[key_type] = new_dict
+        res["global_vars"] = [
+            v[len(version_prefix):] if v.startswith(version_prefix) else v
+            for v in res.get("global_vars", [])
+        ]
         res["modules"] = [library_call_module]
         res["api_usage"] = []
     else:

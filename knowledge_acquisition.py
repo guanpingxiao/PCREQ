@@ -732,7 +732,13 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                           package_name, version)
 
 def extract_fine_grained_knowledge(lib, version):
-    library_call_module = get_library_call_module(lib)
+    # Prefer .call_module (set by identification) over get_library_call_module
+    call_module_file = f"{library_path_prefix}{lib}/{lib}{version}/.call_module"
+    if os.path.exists(call_module_file):
+        with open(call_module_file) as f:
+            library_call_module = f.read().strip()
+    else:
+        library_call_module = get_library_call_module(lib)
     library_path = f"{library_path_prefix}{lib}/{lib}{version}/{library_call_module}"
     if os.path.isfile(library_path + ".py"):
         # Single-file module (e.g. six.py)
@@ -749,6 +755,10 @@ def extract_fine_grained_knowledge(lib, version):
                 new_k = k[len(version_prefix):] if k.startswith(version_prefix) else k
                 new_dict[new_k] = v
             res[key_type] = new_dict
+        res["global_vars"] = [
+            v[len(version_prefix):] if v.startswith(version_prefix) else v
+            for v in res.get("global_vars", [])
+        ]
         res["modules"] = [library_call_module]
         res["api_usage"] = []
     else:
