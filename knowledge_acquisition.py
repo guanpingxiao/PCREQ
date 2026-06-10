@@ -1,5 +1,6 @@
 from utils.util import *
 from utils.util import _lookup_call_module, _save_call_module_map
+from utils.kb_report import generate as kb_report_generate
 from extraction.getCall import get_all_used_api
 from extraction.lib_module_and_package_extraction import *
 from extraction.library_api_and_module import *
@@ -1061,6 +1062,8 @@ if __name__ == '__main__':
           % (_stats["downloaded"], _stats["failed"], _stats["skipped"]))
     logging.info("Build complete: %d downloaded, %d failed, %d skipped",
                  _stats["downloaded"], _stats["failed"], _stats["skipped"])
+
+    kb_report_generate(knowledge_path)
 
 
         
