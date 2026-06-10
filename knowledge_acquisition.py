@@ -30,7 +30,7 @@ constraint_path_prefix = ""
 version_path_prefix = ""
 api_path_prefix = ""
 
-_stats = {"downloaded": 0, "failed": 0, "skipped": 0}
+_stats = {"downloaded": 0, "failed": 0, "skipped": 0, "crashed": 0}
 
 def setup_path(library_path_prefix_pass, constraint_path_prefix_pass, version_path_prefix_pass, api_path_prefix_pass):
     global library_path_prefix, constraint_path_prefix, version_path_prefix, api_path_prefix
@@ -622,9 +622,13 @@ def _write_library_version(pkg, python_version, compatible_versions):
         data[pkg] = {}
     data[pkg][python_version] = compatible_versions
     tmp_path = lv_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp_path, lv_path)
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp_path, lv_path)
+    except (OSError, TypeError):
+        _stats["crashed"] += 1
+        logging.exception("library_version.json write failed for %s", pkg)
 
 
 def _try_artifact(archive_path, target_dir, extract_dir, package_name, version):
@@ -883,9 +887,13 @@ def extract_fine_grained_knowledge(lib, version):
             pass
         return
     tmp_path = api_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(res, f)
-    os.replace(tmp_path, api_path)
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(res, f)
+        os.replace(tmp_path, api_path)
+    except (OSError, TypeError):
+        logging.exception("API JSON write failed for %s==%s", lib, version)
+        raise
     # Clear stale .failed marker
     fail_path = api_path + ".failed"
     if os.path.exists(fail_path):
@@ -893,8 +901,12 @@ def extract_fine_grained_knowledge(lib, version):
 
 def task(args):
     lib, version = args
-    #print(f"Extracting Knowledge-{lib}-{version}")
-    extract_fine_grained_knowledge(lib, version)
+    try:
+        extract_fine_grained_knowledge(lib, version)
+        return (lib, version, True)
+    except Exception:
+        logging.error("extract_fine_grained_knowledge crashed for %s==%s", lib, version)
+        return (lib, version, False)
 
     
 
@@ -913,198 +925,244 @@ if __name__ == '__main__':
 
     # 加载并处理config文件
     config = load_config(config_path)
+
+    knowledge_path = None
+    try:
+        proj_path = config["projPath"]
+        target_project = proj_path.split("/")[-1]
+        target_library = config["targetLibrary"]
+        start_version = config["startVersion"]
+        target_version = config["targetVersion"]
+        python_version = config["pythonVersion"]
+        start_requirements_path = config["requirementsPath"]
+        knowledge_path = config["knowledgePath"].rstrip("/") + "/"
+        library_path_prefix = f"{knowledge_path}libraries/"
+        constraint_path_prefix = f"{knowledge_path}version_constraint/"
+        version_path_prefix = f"{knowledge_path}"
+        api_path_prefix = f"{knowledge_path}library_api/"
+        setup_path(library_path_prefix, constraint_path_prefix, version_path_prefix, api_path_prefix)
+
+        # auto-create knowledge directories
+        for p in [knowledge_path, library_path_prefix, constraint_path_prefix, api_path_prefix]:
+            os.makedirs(p, exist_ok=True)
+
+        # add file logging (append across runs, INFO+ to file, WARNING+ to console)
+        log_file = os.path.join(knowledge_path, "knowledge_acquisition.log")
+        fh = logging.FileHandler(log_file, mode='a')
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logging.getLogger().addHandler(fh)
+        logging.getLogger().setLevel(logging.INFO)
+        for h in logging.getLogger().handlers:
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+                h.setLevel(logging.WARNING)
+        logging.info("=== Build: %s | %s %s->%s | py%s ===",
+                     target_project, target_library, start_version, target_version, python_version)
+
+        fake_start_proj_dependency = get_proj_dependency_from_requirements(start_requirements_path)
+        start_proj_dependency = {}
+        for i in fake_start_proj_dependency:
+            if fake_start_proj_dependency[i] == "0.0.0" or fake_start_proj_dependency[i] == "0.0" or fake_start_proj_dependency[i] == "0":
+                pass
+            else:
+                start_proj_dependency[i] = fake_start_proj_dependency[i]
     
-    proj_path = config["projPath"]
-    target_project = proj_path.split("/")[-1]
-    target_library = config["targetLibrary"]
-    start_version = config["startVersion"]
-    target_version = config["targetVersion"]
-    python_version = config["pythonVersion"]
-    start_requirements_path = config["requirementsPath"]
-    knowledge_path = config["knowledgePath"].rstrip("/") + "/"
-    library_path_prefix = f"{knowledge_path}libraries/"
-    constraint_path_prefix = f"{knowledge_path}version_constraint/"
-    version_path_prefix = f"{knowledge_path}"
-    api_path_prefix = f"{knowledge_path}library_api/"
-    setup_path(library_path_prefix, constraint_path_prefix, version_path_prefix, api_path_prefix)
-
-    # auto-create knowledge directories
-    for p in [knowledge_path, library_path_prefix, constraint_path_prefix, api_path_prefix]:
-        os.makedirs(p, exist_ok=True)
-
-    # add file logging (append across runs, INFO+ to file, WARNING+ to console)
-    log_file = os.path.join(knowledge_path, "knowledge_acquisition.log")
-    fh = logging.FileHandler(log_file, mode='a')
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logging.getLogger().addHandler(fh)
-    logging.getLogger().setLevel(logging.INFO)
-    for h in logging.getLogger().handlers:
-        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
-            h.setLevel(logging.WARNING)
-    logging.info("=== Build: %s | %s %s->%s | py%s ===",
-                 target_project, target_library, start_version, target_version, python_version)
-
-    fake_start_proj_dependency = get_proj_dependency_from_requirements(start_requirements_path)
-    start_proj_dependency = {}
-    for i in fake_start_proj_dependency:
-        if fake_start_proj_dependency[i] == "0.0.0" or fake_start_proj_dependency[i] == "0.0" or fake_start_proj_dependency[i] == "0":
-            pass
+        target_proj_dependency = start_proj_dependency.copy()
+        target_proj_dependency[target_library] = target_version
+        FDG = get_FDG_from_requirements(target_proj_dependency, python_version)
+        sub_graph = get_sub_graph(FDG, target_library)
+        #获取所有的候选版本（含sub_graph可达依赖和直接声明依赖）
+        all_packages = set(sub_graph) | set(target_proj_dependency.keys())
+        if os.path.exists(f"{version_path_prefix}library_version.json"):
+            try:
+                with open(f"{version_path_prefix}library_version.json", "r") as f:
+                    _cached_versions = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                _stats["crashed"] += 1
+                logging.exception("Corrupted library_version.json, resetting")
+                _cached_versions = {}
         else:
-            start_proj_dependency[i] = fake_start_proj_dependency[i]
-    
-    target_proj_dependency = start_proj_dependency.copy()
-    target_proj_dependency[target_library] = target_version
-    FDG = get_FDG_from_requirements(target_proj_dependency, python_version)
-    sub_graph = get_sub_graph(FDG, target_library)
-    #获取所有的候选版本（含sub_graph可达依赖和直接声明依赖）
-    all_packages = set(sub_graph) | set(target_proj_dependency.keys())
-    if os.path.exists(f"{version_path_prefix}library_version.json"):
-        with open(f"{version_path_prefix}library_version.json", "r") as f:
-            _cached_versions = json.load(f)
+            _cached_versions = {}
+        for i in all_packages:
+            library_call_module = get_library_call_module(i)
+            if i in _cached_versions and python_version in _cached_versions[i]:
+                compatible_versions = _cached_versions[i][python_version]
+                # Skip download loop if API extraction already succeeded,
+                # but still refresh the version list from PyPI in case new
+                # versions appeared (e.g. pre-releases were previously filtered).
+                api_dir = f"{api_path_prefix}{i}/"
+                if os.path.isdir(api_dir) and any(f.endswith('.json') for f in os.listdir(api_dir)):
+                    fresh = get_compatible_versions(i, python_version)
+                    if len(fresh) > len(compatible_versions):
+                        compatible_versions = fresh
+                        # Download only newly appearing versions
+                        old_set = set(_cached_versions[i][python_version])
+                        for j in fresh:
+                            if j in old_set:
+                                continue
+                            if not os.path.exists(f"{constraint_path_prefix}{i}/{i}{j}/{i}.json"):
+                                download_from_data(i, j)
+                            print(f"Downloading {i}{j}")
+                            try:
+                                download_pypi_source(i, j, python_version)
+                            except Exception:
+                                _stats["crashed"] += 1
+                                logging.error("download_pypi_source crashed for %s==%s", i, j)
+                    if len(fresh) != len(_cached_versions[i][python_version]):
+                        _write_library_version(i, python_version, compatible_versions)
+                    continue
+            else:
+                compatible_versions = get_compatible_versions(i, python_version)
+            #print(compatible_versions)
+            for j in compatible_versions:
+                if not os.path.exists(f"{constraint_path_prefix}{i}/{i}{j}/{i}.json"):
+                    download_from_data(i, j)
+                print(f"Downloading {i}{j}")
+                try:
+                    download_pypi_source(i, j, python_version)
+                except Exception:
+                    _stats["crashed"] += 1
+                    logging.error("download_pypi_source crashed for %s==%s", i, j)
+            _write_library_version(i, python_version, compatible_versions)
+
+        # Discover transitive dependencies from all versions of all known libraries
+        # (cached per library_version.json state — only rescanned when lib list changes)
+        try:
+            with open(f"{version_path_prefix}library_version.json", 'r') as file:
+                version_ls = json.load(file)
+        except (json.JSONDecodeError, OSError):
+            _stats["crashed"] += 1
+            logging.exception("Corrupted library_version.json, resetting")
+            version_ls = {}
+        known_libs = set(all_packages)
+        discovery_cache = f"{version_path_prefix}discovery_cache.json"
+        lib_names_key = sorted(version_ls.keys())
+        discovered = set()
+        cache_hit = False
+        if os.path.exists(discovery_cache):
+            try:
+                with open(discovery_cache, 'r') as f:
+                    cache = json.load(f)
+                if (cache.get('lib_names') == lib_names_key and
+                        cache.get('python_version') == python_version):
+                    discovered = set(cache.get('discovered', []))
+                    cache_hit = True
+            except (json.JSONDecodeError, KeyError):
+                pass
+        if not cache_hit:
+            for lib in list(all_packages):
+                for ver in version_ls.get(lib, {}).get(python_version, []):
+                    constraint = get_library_constraint_from_metadata(lib, ver, python_version)
+                    for dep in constraint:
+                        base_dep = dep.split('[')[0]
+                        if base_dep not in known_libs and base_dep not in discovered:
+                            discovered.add(base_dep)
+            cache = {'lib_names': lib_names_key, 'python_version': python_version,
+                     'discovered': list(discovered)}
+            tmp_cache = discovery_cache + ".tmp"
+            with open(tmp_cache, "w") as f:
+                json.dump(cache, f)
+            os.replace(tmp_cache, discovery_cache)
+        # Download and register newly discovered libraries
+        for dep in discovered:
+            print(f"Discovered transitive dependency: {dep}")
+            compatible_versions = get_compatible_versions(dep, python_version)
+            # Check if this is a source-only or binary-only package
+            pypi_url = f'https://pypi.org/pypi/{dep}/json'
+            has_sdist = False
+            try:
+                r = requests.get(pypi_url, timeout=7200)
+                if r.status_code == 200:
+                    urls = r.json().get('urls', [])
+                    has_sdist = any(u.get('packagetype') == 'sdist' for u in urls)
+            except requests.RequestException:
+                pass
+            if has_sdist:
+                for ver in compatible_versions:
+                    if not os.path.exists(f"{constraint_path_prefix}{dep}/{dep}{ver}/{dep}.json"):
+                        download_from_data(dep, ver)
+                    try:
+                        download_pypi_source(dep, ver, python_version)
+                    except Exception:
+                        _stats["crashed"] += 1
+                        logging.error("download_pypi_source crashed for %s==%s", dep, ver)
+                try:
+                    with open(f"{version_path_prefix}library_version.json", "r") as f:
+                        data = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    _stats["crashed"] += 1
+                    logging.exception("Corrupted library_version.json, resetting")
+                    data = {}
+                data[dep] = {python_version: compatible_versions}
+                lv_path = f"{version_path_prefix}library_version.json"
+                tmp_path = lv_path + ".tmp"
+                with open(tmp_path, "w") as f:
+                    json.dump(data, f)
+                os.replace(tmp_path, lv_path)
+                all_packages.add(dep)
+            else:
+                print(f"  Skipping {dep} (binary-only, no source distribution)")
+
+        available_version = get_available_version(FDG, sub_graph, python_version, target_proj_dependency, target_library, target_version)
+        available_version[target_library].append(start_version)
+        #补全target_proj_dependency中未被sub_graph覆盖的孤立包
+        try:
+            with open(f"{version_path_prefix}library_version.json", 'r') as file:
+                version_ls = json.load(file)
+        except (json.JSONDecodeError, OSError):
+            _stats["crashed"] += 1
+            logging.exception("Corrupted library_version.json, resetting")
+            version_ls = {}
+        for pkg in target_proj_dependency:
+            if pkg not in available_version:
+                try:
+                    available_version[pkg] = version_ls[pkg][python_version]
+                except KeyError:
+                    pass
+        #补全新发现的传递依赖
+        for dep in discovered:
+            if dep not in available_version:
+                try:
+                    available_version[dep] = version_ls[dep][python_version]
+                except KeyError:
+                    pass
+        #print(available_version)
+
+        all_library = list(target_proj_dependency.keys()) + [d for d in discovered if d in all_packages]
+        #print(all_library)
+        for lib in all_library:
+            if not os.path.exists(f"{api_path_prefix}{lib}/"):
+                os.makedirs(f"{api_path_prefix}{lib}/")
+        tasks = []
+        for lib in all_library:
+            for version in available_version[lib]:
+                if not os.path.exists(f"{api_path_prefix}{lib}/{version}.json"):
+                    print(f"Extracting Knowledge-{lib}-{version}")
+                    tasks.append((lib, version))
+        #print(tasks)
+        sys.setrecursionlimit(5000)
+        cleanup_temp_files()
+        with Pool(processes=min(20, cpu_count())) as pool:
+            for _lib, _ver, ok in pool.map(task, tasks):
+                if not ok:
+                    _stats["crashed"] += 1
+
+        print("Build complete: %d downloaded, %d failed, %d skipped, %d crashed"
+              % (_stats["downloaded"], _stats["failed"], _stats["skipped"],
+                 _stats["crashed"]))
+        logging.info("Build complete: %d downloaded, %d failed, %d skipped, %d crashed",
+                     _stats["downloaded"], _stats["failed"], _stats["skipped"],
+                     _stats["crashed"])
+
+    except BaseException:
+        if knowledge_path:
+            try:
+                kb_report_generate(knowledge_path)
+            except Exception:
+                logging.exception("Failed to generate KB report")
+        raise
     else:
-        _cached_versions = {}
-    for i in all_packages:
-        library_call_module = get_library_call_module(i)
-        if i in _cached_versions and python_version in _cached_versions[i]:
-            compatible_versions = _cached_versions[i][python_version]
-            # Skip download loop if API extraction already succeeded,
-            # but still refresh the version list from PyPI in case new
-            # versions appeared (e.g. pre-releases were previously filtered).
-            api_dir = f"{api_path_prefix}{i}/"
-            if os.path.isdir(api_dir) and any(f.endswith('.json') for f in os.listdir(api_dir)):
-                fresh = get_compatible_versions(i, python_version)
-                if len(fresh) > len(compatible_versions):
-                    compatible_versions = fresh
-                    # Download only newly appearing versions
-                    old_set = set(_cached_versions[i][python_version])
-                    for j in fresh:
-                        if j in old_set:
-                            continue
-                        if not os.path.exists(f"{constraint_path_prefix}{i}/{i}{j}/{i}.json"):
-                            download_from_data(i, j)
-                        print(f"Downloading {i}{j}")
-                        download_pypi_source(i, j, python_version)
-                if len(fresh) != len(_cached_versions[i][python_version]):
-                    _write_library_version(i, python_version, compatible_versions)
-                continue
-        else:
-            compatible_versions = get_compatible_versions(i, python_version)
-        #print(compatible_versions)
-        for j in compatible_versions:
-            if not os.path.exists(f"{constraint_path_prefix}{i}/{i}{j}/{i}.json"):
-                download_from_data(i, j)
-            print(f"Downloading {i}{j}")
-            download_pypi_source(i, j, python_version)
-        _write_library_version(i, python_version, compatible_versions)
-
-    # Discover transitive dependencies from all versions of all known libraries
-    # (cached per library_version.json state — only rescanned when lib list changes)
-    with open(f"{version_path_prefix}library_version.json", 'r') as file:
-        version_ls = json.load(file)
-    known_libs = set(all_packages)
-    discovery_cache = f"{version_path_prefix}discovery_cache.json"
-    lib_names_key = sorted(version_ls.keys())
-    discovered = set()
-    cache_hit = False
-    if os.path.exists(discovery_cache):
-        try:
-            with open(discovery_cache, 'r') as f:
-                cache = json.load(f)
-            if (cache.get('lib_names') == lib_names_key and
-                    cache.get('python_version') == python_version):
-                discovered = set(cache.get('discovered', []))
-                cache_hit = True
-        except (json.JSONDecodeError, KeyError):
-            pass
-    if not cache_hit:
-        for lib in list(all_packages):
-            for ver in version_ls.get(lib, {}).get(python_version, []):
-                constraint = get_library_constraint_from_metadata(lib, ver, python_version)
-                for dep in constraint:
-                    base_dep = dep.split('[')[0]
-                    if base_dep not in known_libs and base_dep not in discovered:
-                        discovered.add(base_dep)
-        cache = {'lib_names': lib_names_key, 'python_version': python_version,
-                 'discovered': list(discovered)}
-        tmp_cache = discovery_cache + ".tmp"
-        with open(tmp_cache, "w") as f:
-            json.dump(cache, f)
-        os.replace(tmp_cache, discovery_cache)
-    # Download and register newly discovered libraries
-    for dep in discovered:
-        print(f"Discovered transitive dependency: {dep}")
-        compatible_versions = get_compatible_versions(dep, python_version)
-        # Check if this is a source-only or binary-only package
-        pypi_url = f'https://pypi.org/pypi/{dep}/json'
-        has_sdist = False
-        try:
-            r = requests.get(pypi_url, timeout=7200)
-            if r.status_code == 200:
-                urls = r.json().get('urls', [])
-                has_sdist = any(u.get('packagetype') == 'sdist' for u in urls)
-        except requests.RequestException:
-            pass
-        if has_sdist:
-            for ver in compatible_versions:
-                if not os.path.exists(f"{constraint_path_prefix}{dep}/{dep}{ver}/{dep}.json"):
-                    download_from_data(dep, ver)
-                download_pypi_source(dep, ver, python_version)
-            with open(f"{version_path_prefix}library_version.json", "r") as f:
-                data = json.load(f)
-            data[dep] = {python_version: compatible_versions}
-            lv_path = f"{version_path_prefix}library_version.json"
-            tmp_path = lv_path + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(data, f)
-            os.replace(tmp_path, lv_path)
-            all_packages.add(dep)
-        else:
-            print(f"  Skipping {dep} (binary-only, no source distribution)")
-
-    available_version = get_available_version(FDG, sub_graph, python_version, target_proj_dependency, target_library, target_version)
-    available_version[target_library].append(start_version)
-    #补全target_proj_dependency中未被sub_graph覆盖的孤立包
-    with open(f"{version_path_prefix}library_version.json", 'r') as file:
-        version_ls = json.load(file)
-    for pkg in target_proj_dependency:
-        if pkg not in available_version:
-            try:
-                available_version[pkg] = version_ls[pkg][python_version]
-            except KeyError:
-                pass
-    #补全新发现的传递依赖
-    for dep in discovered:
-        if dep not in available_version:
-            try:
-                available_version[dep] = version_ls[dep][python_version]
-            except KeyError:
-                pass
-    #print(available_version)
-
-    all_library = list(target_proj_dependency.keys()) + [d for d in discovered if d in all_packages]
-    #print(all_library)
-    for lib in all_library:
-        if not os.path.exists(f"{api_path_prefix}{lib}/"):
-            os.makedirs(f"{api_path_prefix}{lib}/")
-    tasks = []
-    for lib in all_library:
-        for version in available_version[lib]:
-            if not os.path.exists(f"{api_path_prefix}{lib}/{version}.json"):
-                print(f"Extracting Knowledge-{lib}-{version}")
-                tasks.append((lib, version))
-    #print(tasks)
-    sys.setrecursionlimit(5000)
-    cleanup_temp_files()
-    with Pool(processes=min(20, cpu_count())) as pool:
-        pool.map(task, tasks)
-
-    print("Build complete: %d downloaded, %d failed, %d skipped"
-          % (_stats["downloaded"], _stats["failed"], _stats["skipped"]))
-    logging.info("Build complete: %d downloaded, %d failed, %d skipped",
-                 _stats["downloaded"], _stats["failed"], _stats["skipped"])
-
-    kb_report_generate(knowledge_path)
+        kb_report_generate(knowledge_path)
 
 
         
