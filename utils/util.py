@@ -130,6 +130,7 @@ HARDCODED_MODULE_MAP = {
     'python-gflags': 'gflags',
     'websocket-client': 'websocket',
     'nvidia-ml-py3': 'pynvml',
+    'greenlet': 'greenlet',
 }
 
 

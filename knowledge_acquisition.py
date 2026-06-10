@@ -573,6 +573,18 @@ def _identify_call_module(package_name, target_dir, is_wheel=False, extract_root
     if os.path.isfile(os.path.join(extract_root, "__init__.py")):
         return _finish_identify(package_name, package_name, target_dir, extract_root)
 
+    # Step 4d: C-extension fallback — package in known map, all Python
+    # heuristics failed, but C sources exist (e.g. greenlet with greenlet.c).
+    norm = package_name.replace("-", "_")
+    mapped = HARDCODED_MODULE_MAP.get(norm)
+    if mapped is not None:
+        c_files = [f for f in os.listdir(extract_root)
+                   if f.endswith(('.c', '.h', '.pyx'))]
+        if c_files:
+            return _finish_identify(
+                mapped, package_name,
+                target_dir, extract_root=None)  # None skips source move
+
     # All failed
     _write_marker(call_module_failed)
     return None
@@ -581,7 +593,7 @@ def _identify_call_module(package_name, target_dir, is_wheel=False, extract_root
 def _extract_archive(archive_path, target_dir):
     """Extract archive and move contents to target_dir, flattening sdist wrapper."""
     extract_tmp = os.path.join(os.path.dirname(archive_path), "e")
-    os.makedirs(extract_tmp)
+    os.makedirs(extract_tmp, exist_ok=True)
     if archive_path.endswith(('.tar.gz', '.tgz', '.tar.bz2')):
         with tarfile.open(archive_path) as tf:
             tf.extractall(extract_tmp)
@@ -837,6 +849,12 @@ def extract_fine_grained_knowledge(lib, version):
     else:
         library_call_module = get_library_call_module(lib)
     library_path = f"{library_path_prefix}{lib}/{lib}{version}/{library_call_module}"
+
+    # Gate: previously confirmed no extractable API (e.g. C extension)
+    api_path = f"{api_path_prefix}{lib}/{version}.json"
+    if os.path.exists(api_path + ".failed"):
+        return
+
     if os.path.isfile(library_path + ".py"):
         # Single-file module (e.g. six.py)
         from extraction.library_api_and_module import extract_info_from_py_file
@@ -876,7 +894,6 @@ def extract_fine_grained_knowledge(lib, version):
     classes = res["classes"]
     new_classes = shortenPath(classes, lib, version, library_path_prefix)
     res["classes"] = new_classes
-    api_path = f"{api_path_prefix}{lib}/{version}.json"
     # Quality guard: empty modules → extraction failed
     if len(res.get("modules", [])) == 0:
         fail_path = api_path + ".failed"
