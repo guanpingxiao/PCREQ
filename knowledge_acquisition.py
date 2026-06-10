@@ -184,14 +184,15 @@ def get_compatible_versions(package_name, python_version):
 def _parse_wheel_tag(filename):
     """Parse a wheel filename and return (priority, is_pure).
 
-    Priority: 1=py3-none-any, 2=cp{XX}-none-any, 3=other abi=none, 4=sdist/unknown, <0=compiled.
-    is_pure: True if abi==none or it's a sdist/unknown (has source).
+    Priority: 1=py3-none-any, 2=cp{XX}-none-any, 3=other abi=none, <0=compiled.
+    Only meaningful for .whl files; callers should handle sdist separately.
+    is_pure: True if abi==none.
     """
     if not filename.endswith(".whl"):
-        return 4, True  # sdist/unknown -> priority 4, presumed to have source
+        return -1, False  # not a wheel, caller should handle separately
     parts = filename[:-4].split("-")
     if len(parts) < 4:
-        return 4, True  # malformed, treat as sdist
+        return -1, False  # malformed wheel
     # PEP 427: {dist}-{ver}-{python_tag}-{abi_tag}-{platform_tag}.whl
     platform_tag = parts[-1]
     abi_tag = parts[-2]
@@ -214,8 +215,8 @@ def _parse_wheel_tag(filename):
 def _select_download_urls(package_name, version, python_version):
     """Return priority-sorted download URLs from version constraint JSON.
 
-    Priority: pure-py wheel (abi=none) > sdist.
-    Compiled wheels (abi!=none) are excluded.
+    Priority: pure wheel (abi=none) > compiled wheel (platform match) > sdist.
+    Compiled wheels on wrong platform, .exe/.msi/.dmg/.rpm/.deb are excluded.
     """
     json_path = f"{constraint_path_prefix}{package_name}/{package_name}{version}/{package_name}.json"
     if not os.path.exists(json_path):
@@ -253,16 +254,22 @@ def _select_download_urls(package_name, version, python_version):
             continue
         if pkg_type == "bdist_wheel":
             priority, is_pure = _parse_wheel_tag(filename)
-            if is_pure and priority < 4:
-                platform_ok = ("any" in filename) or (plat_tag and plat_tag in filename)
-                if not platform_ok:
-                    priority = 5  # below sdist (4)
+            platform_ok = ("any" in filename) or (plat_tag and plat_tag in filename)
+            if is_pure:
+                if platform_ok:
+                    pass  # keep priority 1-3
+                else:
+                    priority = 4  # pure wheel, wrong platform
+            else:
+                # Compiled wheel: has top_level.txt, better than sdist
+                if platform_ok:
+                    priority = 5  # compiled, matching platform
+                else:
+                    continue  # compiled, wrong platform → skip
         elif pkg_type == "sdist":
-            priority, is_pure = 4, True
+            priority = 6  # last resort, no top_level.txt
         else:
             continue  # unknown artifact type, skip
-        if priority < 0:
-            continue  # compiled wheel, skip
         scored.append((priority, url))
     scored.sort(key=lambda x: x[0])
     return [url for _, url in scored]
@@ -662,20 +669,32 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
                 r = requests.get(pypi_url, timeout=7200)
                 if r.status_code == 200:
                     data = r.json()
-                    # Sort by same priority: pure wheel > sdist > rest
+                    # Platform tag for compiled wheel fallback
+                    if sys.platform.startswith("linux"):
+                        _plat = "manylinux"
+                    elif sys.platform == "darwin":
+                        _plat = "macosx"
+                    elif sys.platform == "win32":
+                        _plat = "win"
+                    else:
+                        _plat = None
+                    # Priority: pure wheel > compiled wheel (platform match) > sdist
                     candidates = []
                     for u in data.get("urls", []):
                         fname = u.get("filename", "")
                         url = u.get("url", "")
-                        if not url or fname.endswith((".exe", ".msi", ".dmg")):
+                        if not url or fname.endswith((".exe", ".msi", ".dmg", ".rpm", ".deb")):
                             continue
                         pkg_type = u.get("packagetype", "")
                         if pkg_type == "bdist_wheel":
                             prio, pure = _parse_wheel_tag(fname)
-                            if prio > 0:
-                                candidates.append((prio, url, fname))
+                            platform_ok = ("any" in fname) or (_plat and _plat in fname)
+                            if pure:
+                                candidates.append((prio if platform_ok else 4, url))
+                            elif platform_ok:
+                                candidates.append((5, url))  # compiled, matching platform
                         elif pkg_type == "sdist":
-                            candidates.append((4, url, fname))
+                            candidates.append((6, url))
                     candidates.sort(key=lambda x: x[0])
                     url = candidates[0][1] if candidates else None
                     if url:
