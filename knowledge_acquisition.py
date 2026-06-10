@@ -201,7 +201,7 @@ def _parse_wheel_tag(filename):
     all_tags = set()
     for t in python_tags:
         all_tags.update(t.split("."))
-    is_pure = abi_tag == "none"
+    is_pure = abi_tag in ("none", "abi3")
     if not is_pure:
         return -1, False  # compiled
     if platform_tag == "any":
@@ -392,11 +392,13 @@ def _score_module_candidate(dirname, pkg_name):
     """Score a directory candidate for top-level module root. Reject if < 3."""
     score = 0
     norm = pkg_name.replace("-", "_")
-    if dirname == norm or dirname == pkg_name:
+    is_name_match = (dirname == norm or dirname == pkg_name)
+    if is_name_match:
         score += 3
-    for prefix in ("test", "doc", "example", "bench"):
-        if dirname.startswith(prefix) or dirname.startswith(prefix + "_") or \
-           dirname.startswith(prefix + "-"):
+    # Only penalize non-matching names (e.g. "testpath" matching "testpath" is fine)
+    for prefix in ("test", "docs", "example", "bench"):
+        if not is_name_match and (dirname.startswith(prefix) or
+            dirname.startswith(prefix + "_") or dirname.startswith(prefix + "-")):
             score -= 5
     return score
 
@@ -423,7 +425,15 @@ def _finish_identify(module_name, package_name, target_dir, extract_root=None):
     if extract_root is not None:
         module_path = _resolve_module_path(module_name, extract_root)
         if module_path is None:
-            return None
+            # Root-as-package: __init__.py at extract_root → root IS the module
+            if os.path.isfile(os.path.join(extract_root, "__init__.py")):
+                dest = os.path.join(target_dir, module_name)
+                os.makedirs(dest, exist_ok=True)
+                for item in os.listdir(extract_root):
+                    shutil.move(os.path.join(extract_root, item),
+                               os.path.join(dest, item))
+            else:
+                return None
         if os.path.isfile(module_path) and module_path.endswith(".py"):
             # Single-file module: move to {target_dir}/{name}.py
             dest = os.path.join(target_dir, module_name + ".py")
@@ -511,26 +521,48 @@ def _identify_call_module(package_name, target_dir, is_wheel=False, extract_root
             if s > 0:
                 scored.append((s, d))
     _scan_candidates(extract_root)
-    # Also scan src/ subdirectory
-    src_dir = os.path.join(extract_root, "src")
-    if os.path.isdir(src_dir):
-        _scan_candidates(src_dir, parent_dir_name="src")
+    # Also scan known layout subdirectories: src/, lib/, py_src/
+    for sub in ("src", "lib", "py_src"):
+        sub_dir = os.path.join(extract_root, sub)
+        if os.path.isdir(sub_dir):
+            _scan_candidates(sub_dir, parent_dir_name=sub)
     if scored:
         scored.sort(reverse=True)
         best_score, best_dir = scored[0]
-        if best_score >= 3:
+        # If only one candidate has __init__.py, accept with lower threshold
+        threshold = 2 if len([s for s, d in scored if s >= 2]) == 1 else 3
+        if best_score >= threshold:
             return _finish_identify(best_dir, package_name, target_dir, extract_root)
 
-    # Step 4b: single-file module fallback (e.g. six.py)
+    # Step 4b: single-file module fallback (e.g. six.py, src/decorator.py)
     norm = package_name.replace("-", "_")
-    for d in os.listdir(extract_root):
-        if d.startswith("."):
-            continue
-        full = os.path.join(extract_root, d)
-        if os.path.isfile(full) and d.endswith(".py"):
-            mod_name = d[:-3]
-            if mod_name == norm or mod_name == package_name:
-                return _finish_identify(mod_name, package_name, target_dir, extract_root)
+    all_py_candidates = []
+    for search_dir in [extract_root] + [
+        os.path.join(extract_root, sub) for sub in ("src", "lib", "py_src")
+        if os.path.isdir(os.path.join(extract_root, sub))
+    ]:
+        for d in os.listdir(search_dir):
+            if d.startswith("."):
+                continue
+            full = os.path.join(search_dir, d)
+            if os.path.isfile(full) and d.endswith(".py"):
+                mod_name = d[:-3]
+                if mod_name in ("setup", "conftest", "test", "conf"):
+                    continue
+                if "_test" in mod_name or mod_name.endswith("_test") or \
+                   "unittest" in mod_name or mod_name == "test":
+                    continue
+                # Name match → immediate accept
+                if mod_name == norm or mod_name == package_name:
+                    return _finish_identify(mod_name, package_name, target_dir, extract_root)
+                all_py_candidates.append(mod_name)
+    # No name match but only one candidate → accept (e.g. pysocks→socks.py)
+    if len(all_py_candidates) == 1:
+        return _finish_identify(all_py_candidates[0], package_name, target_dir, extract_root)
+
+    # Step 4c: root-as-package (__init__.py at extract root)
+    if os.path.isfile(os.path.join(extract_root, "__init__.py")):
+        return _finish_identify(package_name, package_name, target_dir, extract_root)
 
     # All failed
     _write_marker(call_module_failed)

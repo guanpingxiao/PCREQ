@@ -126,6 +126,10 @@ HARDCODED_MODULE_MAP = {
     'scikit-image': 'skimage',
     'tensorboardx': 'tensorboardX',
     'python-dateutil': 'dateutil',
+    'pysocks': 'socks',
+    'python-gflags': 'gflags',
+    'websocket-client': 'websocket',
+    'nvidia-ml-py3': 'pynvml',
 }
 
 
