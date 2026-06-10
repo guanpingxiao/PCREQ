@@ -266,9 +266,9 @@ def _select_download_urls(package_name, version, python_version):
                 if platform_ok:
                     priority = 5  # compiled, matching platform
                 else:
-                    continue  # compiled, wrong platform → skip
+                    priority = 6  # compiled, any platform (has top_level.txt)
         elif pkg_type == "sdist":
-            priority = 6  # last resort, no top_level.txt
+            priority = 7  # last resort, no top_level.txt
         else:
             continue  # unknown artifact type, skip
         scored.append((priority, url))
@@ -441,6 +441,14 @@ def _finish_identify(module_name, package_name, target_dir, extract_root=None):
             if os.path.exists(dest):
                 os.remove(dest)
             shutil.move(module_path, dest)
+        elif os.path.isfile(module_path + ".py"):
+            # _resolve_module_path returned path without .py for file
+            # in subdir (e.g. src/decorator.py → src/decorator)
+            py_path = module_path + ".py"
+            dest = os.path.join(target_dir, module_name + ".py")
+            if os.path.exists(dest):
+                os.remove(dest)
+            shutil.move(py_path, dest)
         else:
             dest = os.path.join(target_dir, module_name)
             if os.path.exists(dest):
@@ -619,7 +627,77 @@ def _write_library_version(pkg, python_version, compatible_versions):
     os.replace(tmp_path, lv_path)
 
 
-def download_pypi_source(package_name, version = None, python_version = "3.7", output_dir = "."):
+def _try_artifact(archive_path, target_dir, extract_dir, package_name, version):
+    """Extract *archive_path* to *extract_dir* and check for .py files.
+
+    Returns True if at least one .py file was found, False otherwise.
+    Side effect: deletes *archive_path* from target_dir on failure.
+    """
+    tmpdir = os.path.dirname(extract_dir)
+    # Clean extract_dir and _extract_archive's e/ dir for fresh extraction
+    if os.path.exists(extract_dir):
+        shutil.rmtree(extract_dir)
+    extract_tmp = os.path.join(tmpdir, "e")
+    if os.path.exists(extract_tmp):
+        shutil.rmtree(extract_tmp)
+
+    # Copy archive to tmpdir so _extract_archive's temp dir stays in tmpdir
+    tmp_archive = os.path.join(tmpdir, os.path.basename(archive_path))
+    shutil.copy2(archive_path, tmp_archive)
+    _extract_archive(tmp_archive, extract_dir)
+
+    if any(f.endswith('.py') for _, _, files in os.walk(extract_dir)
+           for f in files):
+        return True
+    # No .py — delete the saved archive so target_dir stays clean
+    if os.path.exists(archive_path):
+        os.remove(archive_path)
+    logging.info("No .py in %s for %s==%s, trying next URL",
+                 os.path.basename(archive_path), package_name, version)
+    return False
+
+
+def _build_fallback_candidates(package_name, version):
+    """Build priority-sorted URL list from PyPI JSON API. Returns [(url, is_wheel), ...]."""
+    candidates = []
+    pypi_url = f"https://pypi.org/pypi/{package_name}/{version}/json"
+    try:
+        r = requests.get(pypi_url, timeout=7200)
+        if r.status_code != 200:
+            return candidates
+        data = r.json()
+        if sys.platform.startswith("linux"):
+            _plat = "manylinux"
+        elif sys.platform == "darwin":
+            _plat = "macosx"
+        elif sys.platform == "win32":
+            _plat = "win"
+        else:
+            _plat = None
+        for u in data.get("urls", []):
+            fname = u.get("filename", "")
+            url = u.get("url", "")
+            if not url or fname.endswith((".exe", ".msi", ".dmg", ".rpm", ".deb")):
+                continue
+            pkg_type = u.get("packagetype", "")
+            if pkg_type == "bdist_wheel":
+                prio, pure = _parse_wheel_tag(fname)
+                platform_ok = ("any" in fname) or (_plat and _plat in fname)
+                if pure:
+                    candidates.append((prio if platform_ok else 4, url, True))
+                elif platform_ok:
+                    candidates.append((5, url, True))
+                else:
+                    candidates.append((6, url, True))  # compiled, any platform
+            elif pkg_type == "sdist":
+                candidates.append((7, url, False))
+        candidates.sort(key=lambda x: x[0])
+    except requests.RequestException:
+        pass
+    return [(url, is_wheel) for _, url, is_wheel in candidates]
+
+
+def download_pypi_source(package_name, version=None, python_version="3.7", output_dir="."):
     target_dir = f"{library_path_prefix}{package_name}/{package_name}{version}"
 
     # Gate 1: already identified
@@ -640,139 +718,102 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
         _stats["skipped"] += 1
         return
 
-    # Determine artifact type and download URL
     os.makedirs(target_dir, exist_ok=True)
+
+    # Build URL sources: primary (constraint JSON) + fallback (PyPI API)
+    url_sources = []
     urls = _select_download_urls(package_name, version, python_version)
+    if urls:
+        for u in urls:
+            fname = os.path.basename(u.split("#")[0].split("?")[0])
+            url_sources.append((u, fname.endswith(".whl")))
+    else:
+        url_sources = _build_fallback_candidates(package_name, version)
+
+    if not url_sources:
+        with open(target_dir + ".no_source", "w") as _:
+            pass
+        if os.path.exists(target_dir):
+            shutil.rmtree(target_dir)
+        _stats["failed"] += 1
+        logging.warning("No viable artifact for %s==%s", package_name, version)
+        return
 
     with tempfile.TemporaryDirectory() as tmpdir:
         artifact_path = None
         is_wheel = False
+        extract_dir = os.path.join(tmpdir, "extract")
 
-        # --- Download phase ---
-        if urls:
-            # Check if archive already saved
-            for u in urls:
-                fname = os.path.basename(u.split("#")[0].split("?")[0])
-                existing = os.path.join(target_dir, fname)
-                if os.path.exists(existing):
+        # Try each URL in priority order, validate .py after extraction
+        for url, _is_wheel in url_sources:
+            fname = os.path.basename(url.split("#")[0].split("?")[0])
+            existing = os.path.join(target_dir, fname)
+
+            if os.path.exists(existing):
+                # Already have this archive — extract and check .py
+                if _try_artifact(existing, target_dir, extract_dir,
+                                 package_name, version):
                     artifact_path = existing
-                    is_wheel = fname.endswith(".whl")
+                    is_wheel = _is_wheel
                     _stats["skipped"] += 1
                     break
-            if artifact_path is None:
-                for url in urls:
-                    fname = os.path.basename(url.split("#")[0].split("?")[0])
-                    dl_path = os.path.join(tmpdir, fname)
-                    success = False
-                    for attempt in range(3):
-                        try:
-                            r = requests.get(url, timeout=7200, stream=True)
-                            if r.status_code == 200:
-                                expected_size = int(r.headers.get('Content-Length', 0))
-                                actual_size = 0
-                                with open(dl_path, "wb") as f:
-                                    for chunk in r.iter_content(chunk_size=8192):
-                                        f.write(chunk)
-                                        actual_size += len(chunk)
-                                if expected_size > 0 and actual_size != expected_size:
-                                    logging.warning("Content-Length mismatch for %s: expected %d, got %d",
-                                                    url[:80], expected_size, actual_size)
-                                # Save archive to target_dir
-                                saved = os.path.join(target_dir, fname)
-                                shutil.copy2(dl_path, saved)
-                                artifact_path = saved
-                                is_wheel = fname.endswith(".whl")
-                                success = True
-                                break
-                        except requests.ConnectionError as e:
-                            if attempt < 2:
-                                time.sleep(2 ** attempt)
-                                continue
-                            logging.warning("Download retry exhausted: %s", e)
-                        except OSError as e:
-                            logging.warning("Disk write error, skipping %s==%s: %s",
-                                          package_name, version, e)
-                            break
-                    if success:
+                # No .py — archive was deleted by _try_artifact, try next URL
+                continue
+
+            # Download
+            dl_path = os.path.join(tmpdir, fname)
+            downloaded = False
+            for attempt in range(3):
+                try:
+                    r = requests.get(url, timeout=7200, stream=True)
+                    if r.status_code == 200:
+                        expected_size = int(r.headers.get('Content-Length', 0))
+                        actual_size = 0
+                        with open(dl_path, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                                actual_size += len(chunk)
+                        if expected_size > 0 and actual_size != expected_size:
+                            logging.warning("Content-Length mismatch for %s: "
+                                            "expected %d, got %d",
+                                            url[:80], expected_size, actual_size)
+                        downloaded = True
                         break
-        else:
-            # Fallback: query PyPI API directly
-            pypi_url = f"https://pypi.org/pypi/{package_name}/{version}/json"
-            try:
-                r = requests.get(pypi_url, timeout=7200)
-                if r.status_code == 200:
-                    data = r.json()
-                    # Platform tag for compiled wheel fallback
-                    if sys.platform.startswith("linux"):
-                        _plat = "manylinux"
-                    elif sys.platform == "darwin":
-                        _plat = "macosx"
-                    elif sys.platform == "win32":
-                        _plat = "win"
-                    else:
-                        _plat = None
-                    # Priority: pure wheel > compiled wheel (platform match) > sdist
-                    candidates = []
-                    for u in data.get("urls", []):
-                        fname = u.get("filename", "")
-                        url = u.get("url", "")
-                        if not url or fname.endswith((".exe", ".msi", ".dmg", ".rpm", ".deb")):
-                            continue
-                        pkg_type = u.get("packagetype", "")
-                        if pkg_type == "bdist_wheel":
-                            prio, pure = _parse_wheel_tag(fname)
-                            platform_ok = ("any" in fname) or (_plat and _plat in fname)
-                            if pure:
-                                candidates.append((prio if platform_ok else 4, url))
-                            elif platform_ok:
-                                candidates.append((5, url))  # compiled, matching platform
-                        elif pkg_type == "sdist":
-                            candidates.append((6, url))
-                    candidates.sort(key=lambda x: x[0])
-                    url = candidates[0][1] if candidates else None
-                    if url:
-                        fname = os.path.basename(url.split("#")[0].split("?")[0])
-                        dl_path = os.path.join(tmpdir, fname)
-                        r2 = requests.get(url, timeout=7200, stream=True)
-                        if r2.status_code == 200:
-                            expected_size = int(r2.headers.get('Content-Length', 0))
-                            actual_size = 0
-                            with open(dl_path, "wb") as f:
-                                for chunk in r2.iter_content(chunk_size=8192):
-                                    f.write(chunk)
-                                    actual_size += len(chunk)
-                            if expected_size > 0 and actual_size != expected_size:
-                                logging.warning("Content-Length mismatch for %s: expected %d, got %d",
-                                                url[:80], expected_size, actual_size)
-                            saved = os.path.join(target_dir, fname)
-                            shutil.copy2(dl_path, saved)
-                            artifact_path = saved
-                            is_wheel = False
-            except requests.RequestException:
-                pass
+                except requests.ConnectionError as e:
+                    if attempt < 2:
+                        time.sleep(2 ** attempt)
+                        continue
+                    logging.warning("Download retry exhausted: %s", e)
+                except OSError as e:
+                    logging.warning("Disk write error, skipping %s==%s: %s",
+                                    package_name, version, e)
+                    break
+            if not downloaded:
+                continue
+
+            # Save archive to target_dir
+            saved = os.path.join(target_dir, fname)
+            shutil.copy2(dl_path, saved)
+
+            # Extract and check .py
+            if _try_artifact(saved, target_dir, extract_dir,
+                             package_name, version):
+                artifact_path = saved
+                is_wheel = _is_wheel
+                break
+            # No .py — archive was deleted by _try_artifact, try next URL
 
         if artifact_path is None:
-            _stats["failed"] += 1
-            logging.warning("Download failed for %s==%s", package_name, version)
-            return
-
-        # --- Identification phase ---
-        extract_dir = os.path.join(tmpdir, "extract")
-        # Copy archive to tmpdir so _extract_archive's temp dir stays in tmpdir
-        tmp_archive = os.path.join(tmpdir, os.path.basename(artifact_path))
-        shutil.copy2(artifact_path, tmp_archive)
-        _extract_archive(tmp_archive, extract_dir)
-        if not any(f.endswith('.py') for _, _, files in os.walk(extract_dir)
-                   for f in files):
             with open(target_dir + ".no_source", "w") as _:
                 pass
             if os.path.exists(target_dir):
                 shutil.rmtree(target_dir)
             _stats["failed"] += 1
             logging.warning("No source files in %s==%s, skipping",
-                          package_name, version)
+                            package_name, version)
             return
 
+        # --- Identification phase ---
         identified = _identify_call_module(package_name, target_dir,
                                            is_wheel=is_wheel,
                                            extract_root=extract_dir)
@@ -781,7 +822,7 @@ def download_pypi_source(package_name, version = None, python_version = "3.7", o
         else:
             _stats["failed"] += 1
             logging.warning("call_module identification failed for %s==%s",
-                          package_name, version)
+                            package_name, version)
 
 def extract_fine_grained_knowledge(lib, version):
     # Prefer .call_module (set by identification) over get_library_call_module

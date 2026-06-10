@@ -162,6 +162,7 @@ def _save_call_module_map(knowledge_path, pkg, module, is_auto):
     cmap[pkg] = {"module": module, "_auto": is_auto}
     json_path = os.path.join(knowledge_path, "call_module_map.json")
     tmp_path = json_path + ".tmp"
+    os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
     with open(tmp_path, "w") as f:
         json.dump(cmap, f, indent=2)
     os.replace(tmp_path, json_path)
