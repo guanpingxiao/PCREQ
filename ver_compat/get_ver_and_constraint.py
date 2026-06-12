@@ -39,7 +39,7 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
             try:
                 condidate_version = version_ls[proj_dependency.lower()][python_version]
             except:
-                print(proj_dependency.lower())
+                pass
             #print(proj_dependency)
             condidate_version = sorted(set(str(parse_version(v)) for v in condidate_version),
                                    key=parse_version)
@@ -74,7 +74,7 @@ def get_available_version(FDG, sub_graph, python_version, target_proj_dependency
                         condidate_version = [str(parse_version(v)) for v in version_ls[proj_dependency][python_version]]
                         break
             except:
-                print(proj_dependency)
+                pass
                 continue
             #将起始requirements.txt中的约束版本放在第一个，模拟pip安装
             target_ver = target_proj_dependency[proj_dependency]

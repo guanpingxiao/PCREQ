@@ -534,12 +534,14 @@ def _extract_and_save_api(library_path, library_call_module, lib, version, json_
 def _raise_call_module_error(lib, version, library_path):
     raise FileNotFoundError(
         f"Module source not found: {library_path}\n"
-        f"  Source directory missing for {lib}=={version}.\n"
+        f"  KB data missing for {lib}=={version}.\n"
+        f"  The knowledge base at {library_path_prefix.rstrip('/')} does not contain\n"
+        f"  source for this version. This typically means the version was not\n"
+        f"  properly downloaded during knowledge acquisition.\n"
         f"  Fix:\n"
-        f"    1. Verify source was downloaded to libraries/{lib}/{lib}{version}/\n"
-        f"    2. If the package uses a non-standard import name, add it to\n"
-        f"       get_library_call_module in utils/util.py\n"
-        f"    3. Re-run knowledge_acquisition.py to re-download\n"
+        f"    1. Re-run knowledge_acquisition.py to download and extract {lib}=={version}\n"
+        f"    2. If the problem persists, check if the package uses a non-standard\n"
+        f"       import name and add it to get_library_call_module in utils/util.py\n"
     )
 
 
