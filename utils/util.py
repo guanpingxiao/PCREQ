@@ -112,88 +112,25 @@ def extract_classes_from_file(file_path):
 
     return classes
 
-# Module-level cache for call_module_map.json
-_cmap = None
-_cmap_path = None
-
-HARDCODED_MODULE_MAP = {
-    'scikit-learn': 'sklearn',
-    'pillow': 'PIL',
-    'grpcio': 'grpc',
-    'absl-py': 'absl',
-    'pytorch-lightning': 'pytorch_lightning',
-    'opencv-python': 'cv2',
-    'scikit-image': 'skimage',
-    'tensorboardx': 'tensorboardX',
-    'python-dateutil': 'dateutil',
-    'pysocks': 'socks',
-    'python-gflags': 'gflags',
-    'websocket-client': 'websocket',
-    'nvidia-ml-py3': 'pynvml',
-    'greenlet': 'greenlet',
-}
-
-
-def _load_call_module_map(knowledge_path):
-    """Load call_module_map.json into module-level cache."""
-    global _cmap, _cmap_path
-    json_path = os.path.join(knowledge_path, "call_module_map.json")
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r") as f:
-                _cmap = json.load(f)
-            _cmap_path = knowledge_path
-            return _cmap
-        except (json.JSONDecodeError, OSError):
-            pass
-    _cmap = {}
-    _cmap_path = knowledge_path
-    return _cmap
-
-
-def _save_call_module_map(knowledge_path, pkg, module, is_auto):
-    """Persist a call_module mapping entry. Does not overwrite manual entries."""
-    global _cmap
-    cmap = _cmap
-    if cmap is None or _cmap_path != knowledge_path:
-        cmap = _load_call_module_map(knowledge_path)
-    # Do not overwrite manual entries
-    if pkg in cmap and not cmap[pkg].get("_auto", False):
-        return
-    cmap[pkg] = {"module": module, "_auto": is_auto}
-    json_path = os.path.join(knowledge_path, "call_module_map.json")
-    tmp_path = json_path + ".tmp"
-    if knowledge_path:
-        os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
-    with open(tmp_path, "w") as f:
-        json.dump(cmap, f, indent=2)
-    os.replace(tmp_path, json_path)
-    _cmap = cmap
-
-
-def _lookup_call_module(library, knowledge_path=None):
-    """Look up the import module name for a library.
-
-    Priority: manual entry > auto entry > hardcoded map > library name as-is.
-    """
-    global _cmap
-    # Load cache if not loaded or path changed
-    if knowledge_path is not None:
-        if _cmap is None or _cmap_path != knowledge_path:
-            _load_call_module_map(knowledge_path)
-    cmap = _cmap if _cmap is not None else {}
-
-    if library in cmap:
-        return cmap[library]["module"]
-
-    if library in HARDCODED_MODULE_MAP:
-        return HARDCODED_MODULE_MAP[library]
-
-    return library
-
-
 def get_library_call_module(library):
-    return _lookup_call_module(library)
+    module_map = {
+        'scikit-learn': 'sklearn',
+        'pillow': 'PIL',
+        'grpcio': 'grpc',
+        'absl-py': 'absl',
+        'pytorch-lightning': 'pytorch_lightning',
+        'opencv-python': 'cv2',
+        'scikit-image': 'skimage',
+        'tensorboardx': 'tensorboardX',
+        'python-dateutil': 'dateutil',
+        'python-dotenv': 'dotenv',
+        'pysocks': 'socks',
+        'python-gflags': 'gflags',
+        'websocket-client': 'websocket',
+        'nvidia-ml-py3': 'pynvml',
+        'greenlet': 'greenlet',
+    }
+    return module_map.get(library, library)
 
 def transform_and_remove_last_segment(input_str):
     # 将点号替换为斜杠

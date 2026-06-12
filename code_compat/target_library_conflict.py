@@ -534,12 +534,12 @@ def _extract_and_save_api(library_path, library_call_module, lib, version, json_
 def _raise_call_module_error(lib, version, library_path):
     raise FileNotFoundError(
         f"Module source not found: {library_path}\n"
-        f"  call_module not identified for {lib}=={version}.\n"
+        f"  Source directory missing for {lib}=={version}.\n"
         f"  Fix:\n"
-        f"    1. Edit {version_path_prefix}call_module_map.json:\n"
-        f'       {{"{lib}": {{"module": "<correct_import_name>"}}}}\n'
-        f"    2. Delete .call_module_failed and re-run knowledge_acquisition.py\n"
-        f"       libraries/{lib}/{lib}{version}/.call_module_failed"
+        f"    1. Verify source was downloaded to libraries/{lib}/{lib}{version}/\n"
+        f"    2. If the package uses a non-standard import name, add it to\n"
+        f"       get_library_call_module in utils/util.py\n"
+        f"    3. Re-run knowledge_acquisition.py to re-download\n"
     )
 
 

@@ -50,7 +50,7 @@ def split_packname_and_cons(line):
     else:
         res.append(line)
     for i in range(len(res)):
-        res[i]=res[i].replace(" ","").split('[')[0]
+        res[i]=res[i].replace(" ","").split('[')[0].lower()
     return res
 
 def remove_parentheses_from_end(elements):
@@ -114,41 +114,35 @@ def remove_elements_with_extra(lst):
             new_requires_dist.append(item)
     return new_requires_dist
 
-def remove_incompat_python_version(requires_dist, python_version):  
-    #TODO 目前是将所有对python_version有约束的都去掉，但是应该考虑是否符合约束
+def _platform_mismatch(condition):
+    """Return True if PEP 508 sys_platform marker is incompatible with current platform."""
+    import sys
+    if 'sys_platform' not in condition:
+        return False
+    is_linux = sys.platform.startswith('linux')
+    is_mac = sys.platform == 'darwin'
+    is_win = sys.platform == 'win32'
+    if ('"linux"' in condition or "'linux'" in condition) and not is_linux:
+        return True
+    if ('"darwin"' in condition or "'darwin'" in condition) and not is_mac:
+        return True
+    if ('"win32"' in condition or "'win32'" in condition) and not is_win:
+        return True
+    return False
+
+
+# TODO 目前是将所有对python_version有约束的都去掉，但是应该考虑是否符合约束
+# KB-11: 追加 sys_platform 过滤，避免 Linux 上引入 win32-only 依赖（如 gevent→cffi）
+def remove_incompat_python_version(requires_dist, python_version):
     new_requires_dist = []
     for item in requires_dist:
-        if 'python_version' not in item:
-            new_requires_dist.append(item)
-        '''
-        else:
-            new_item = item.split(";")[-1]
-            if "and" in new_item:
-                i = new_item.split("and")[0]
-                new_i = i.replace(" ", "")
-                i_require_python_version = new_i.replace("python_version", "")
-                i_require_python_version = i_require_python_version.replace("\"", "")
-                i_require_python_version = i_require_python_version.replace("\'", "")
-                j = new_item.split("and")[-1]
-                new_j = j.replace(" ", "")
-                j_require_python_version = new_j.replace("python_version", "")
-                j_require_python_version = j_require_python_version.replace("\"", "")
-                j_require_python_version = j_require_python_version.replace("\'", "")
-                require_python_version = i_require_python_version + "," +j_require_python_version
-                #print(require_python_version)
-            else:
-                new_item = new_item.replace(" ", "")
-                require_python_version = new_item.replace("python_version", "")
-                require_python_version = require_python_version.replace("\"", "")
-                require_python_version = require_python_version.replace("\'", "")
-                #print(require_python_version)
-            #print(new_item.replace(" ", ""))
-            try:
-                if is_version_compat(python_version, require_python_version):
-                    new_requires_dist.append(item)
-            except:
+        if ';' in item:
+            condition = item.split(';', 1)[1].strip()
+            if _platform_mismatch(condition):
                 continue
-        '''
+            if 'python_version' in condition:
+                continue
+        new_requires_dist.append(item)
     return new_requires_dist
 
 def get_tree(filename):
@@ -270,23 +264,21 @@ def get_packname_and_cons_from_setup(librarypath):
 
 def get_library_constraint_from_metadata(pkg, version, python_version):
     res = {}
-    #从PyPI约束JSON中提取依赖（与旧版行为一致：原代码因路径bug永远读不到setup.py和METADATA）
-    json_path = constraint_path_prefix + pkg + '/' + pkg + version + '/' + pkg + '.json'
     requires_dist = None
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, 'r') as file:
-                data = json.load(file)
-        except:
-            print(f"No {pkg}: {version} version constraint")
-            download_from_data(pkg, version)
 
+    # Priority 1: local .dist-info/METADATA (most reliable)
+    metadata_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}-{version}.dist-info/METADATA"
+    if os.path.exists(metadata_path):
         try:
-            requires_dist = data['info']['requires_dist']
-        except:
-            requires_dist = None
-    else:
-        #回退到setup.py
+            with open(metadata_path, 'r') as file:
+                metadata = file.read()
+            requires_dist_pattern = r"Requires-Dist: (.+?)(?=\n|$)"
+            requires_dist = re.findall(requires_dist_pattern, metadata)
+        except Exception:
+            pass
+
+    # Priority 2: setup.py (source distribution)
+    if requires_dist is None:
         library_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}"
         if os.path.exists(library_path):
             s = get_packname_and_cons_from_setup(library_path)
@@ -295,25 +287,27 @@ def get_library_constraint_from_metadata(pkg, version, python_version):
                     res[i[0]] = i[1].replace("-", ".")
                 else:
                     res[i[0]] = None
-        else:
-            #回退到METADATA
-            metadata_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}-{version}.dist-info/METADATA"
-            if os.path.exists(metadata_path):
-                try:
-                    with open(metadata_path, 'r') as file:
-                        metadata = file.read()
-                    requires_dist_pattern = r"Requires-Dist: (.+?)(?=\n|$)"
-                    requires_dist = re.findall(requires_dist_pattern, metadata)
-                except:
-                    requires_dist = None
-    #print(requires_dist)
-                     
+            return res
+
+    # Priority 3: PyPI JSON (fallback, may have data loss)
+    if requires_dist is None:
+        json_path = constraint_path_prefix + pkg + '/' + pkg + version + '/' + pkg + '.json'
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, 'r') as file:
+                    data = json.load(file)
+            except Exception:
+                print(f"No {pkg}: {version} version constraint")
+                download_from_data(pkg, version)
+            try:
+                requires_dist = data.get('info', {}).get('requires_dist')
+            except Exception:
+                requires_dist = None
+
     if requires_dist is not None:
         requires_dist = remove_elements_with_extra(requires_dist)
         requires_dist = remove_incompat_python_version(requires_dist, python_version)
-        #TODO 提取包的时候注意后面有关python的信息
         new_requires_dist = split_and_take_first_part(requires_dist)
-        #print(f"{pkg}{version}: {new_requires_dist}")
         for i in range(len(requires_dist)):
             tmp = requires_dist[i]
             tmp = tmp.split(';')[0]
@@ -322,17 +316,13 @@ def get_library_constraint_from_metadata(pkg, version, python_version):
             new_requires_dist[i] = remove_parentheses_from_end(tmp1)
     else:
         new_requires_dist = None
-            #print(f"{pkg}{version}: {new_requires_dist}")
 
-    #print(new_requires_dist)
     if new_requires_dist is not None:
-        #print(new_requires_dist)
         for i in new_requires_dist:
             try:
                 res[i[0]] = i[1].replace("-", ".")
-            except:
+            except Exception:
                 res[i[0]] = None
-            #res.append(i)  
     return res 
 
 def get_library_dependency_from_metadata(pkg, version, python_version):

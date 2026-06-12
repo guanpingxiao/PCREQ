@@ -1,5 +1,4 @@
 from utils.util import *
-from utils.util import _lookup_call_module, _save_call_module_map
 from utils.kb_report import generate as kb_report_generate
 from extraction.getCall import get_all_used_api
 from extraction.lib_module_and_package_extraction import *
@@ -162,11 +161,25 @@ def get_compatible_versions(package_name, python_version):
                         compatible_versions.append(version)
                         break
                     elif file_info["python_version"] != None and f"py{python_version.split('.')[0]}" in file_info["python_version"]:
-                        if "=" in file_info["requires_python"] or ">" in file_info["requires_python"] or "<" in file_info["requires_python"]:
-                            if SpecifierSet(file_info["requires_python"]).contains(python_version):
-                                compatible_versions.append(version)
-                                break
-                    elif file_info["requires_python"] == None:
+                        requires_python = file_info.get("requires_python")
+                        if requires_python is not None and (">" in requires_python or "<" in requires_python or "=" in requires_python):
+                            try:
+                                if SpecifierSet(requires_python).contains(python_version):
+                                    compatible_versions.append(version)
+                                    break
+                            except InvalidSpecifier:
+                                pass
+                        elif requires_python is None:
+                            compatible_versions.append(version)
+                            break
+                        else:
+                            try:
+                                if SpecifierSet(requires_python).contains(python_version):
+                                    compatible_versions.append(version)
+                                    break
+                            except InvalidSpecifier:
+                                pass
+                    elif file_info.get("requires_python") is None:
                         compatible_versions.append(version)
                         break
                     elif SpecifierSet(file_info["requires_python"]).contains(python_version):
@@ -183,17 +196,18 @@ def get_compatible_versions(package_name, python_version):
     return compatible_versions
 
 def _parse_wheel_tag(filename):
-    """Parse a wheel filename and return (priority, is_pure).
+    """Parse a wheel filename and return (priority, is_pure, py_major).
 
     Priority: 1=py3-none-any, 2=cp{XX}-none-any, 3=other abi=none, <0=compiled.
     Only meaningful for .whl files; callers should handle sdist separately.
     is_pure: True if abi==none.
+    py_major: 3 if python tag matches py3/cp3X, 2 for py2/cp2X, 0 for other.
     """
     if not filename.endswith(".whl"):
-        return -1, False  # not a wheel, caller should handle separately
+        return -1, False, 0  # not a wheel, caller should handle separately
     parts = filename[:-4].split("-")
     if len(parts) < 4:
-        return -1, False  # malformed wheel
+        return -1, False, 0  # malformed wheel
     # PEP 427: {dist}-{ver}-{python_tag}-{abi_tag}-{platform_tag}.whl
     platform_tag = parts[-1]
     abi_tag = parts[-2]
@@ -202,22 +216,37 @@ def _parse_wheel_tag(filename):
     all_tags = set()
     for t in python_tags:
         all_tags.update(t.split("."))
+    # Extract py_major
+    py_major = 0
+    for t in all_tags:
+        if t == "py3" or t.startswith("cp3"):
+            py_major = 3
+            break
+        elif t == "py2" or t.startswith("cp2"):
+            py_major = 2
     is_pure = abi_tag in ("none", "abi3")
     if not is_pure:
-        return -1, False  # compiled
+        return -1, False, py_major  # compiled
     if platform_tag == "any":
         if any(t == "py3" or t.startswith("py3") for t in all_tags):
-            return 1, True  # py3-none-any
+            return 1, True, py_major  # py3-none-any
         elif any(t.startswith("cp") for t in all_tags):
-            return 2, True  # cp{XX}-none-any
-    return 3, True  # abi=none but has platform tag
+            return 2, True, py_major  # cp{XX}-none-any
+    return 3, True, py_major  # abi=none but has platform tag
 
 
 def _select_download_urls(package_name, version, python_version):
     """Return priority-sorted download URLs from version constraint JSON.
 
-    Priority: pure wheel (abi=none) > compiled wheel (platform match) > sdist.
-    Compiled wheels on wrong platform, .exe/.msi/.dmg/.rpm/.deb are excluded.
+    Priority order (lower = better):
+      1. py3-none-any (pure, platform=any, py3)
+      2. cpXX-none-any (pure, platform=any, cpXX)
+      3. pure wheel with platform tag
+      4. pure wheel, wrong platform
+      5. compiled wheel, platform match, py3
+      6. compiled wheel, platform match, py2
+      7. compiled wheel, any platform
+      8. sdist
     """
     json_path = f"{constraint_path_prefix}{package_name}/{package_name}{version}/{package_name}.json"
     if not os.path.exists(json_path):
@@ -254,7 +283,7 @@ def _select_download_urls(package_name, version, python_version):
         if filename.endswith((".exe", ".msi", ".dmg", ".rpm", ".deb")):
             continue
         if pkg_type == "bdist_wheel":
-            priority, is_pure = _parse_wheel_tag(filename)
+            priority, is_pure, py_major = _parse_wheel_tag(filename)
             platform_ok = ("any" in filename) or (plat_tag and plat_tag in filename)
             if is_pure:
                 if platform_ok:
@@ -262,332 +291,193 @@ def _select_download_urls(package_name, version, python_version):
                 else:
                     priority = 4  # pure wheel, wrong platform
             else:
-                # Compiled wheel: has top_level.txt, better than sdist
+                # Compiled wheel: prefer py3 over py2, then any platform
                 if platform_ok:
-                    priority = 5  # compiled, matching platform
+                    if py_major == 3:
+                        priority = 5  # compiled, matching platform, py3
+                    else:
+                        priority = 6  # compiled, matching platform, py2
                 else:
-                    priority = 6  # compiled, any platform (has top_level.txt)
+                    priority = 7  # compiled, any platform
         elif pkg_type == "sdist":
-            priority = 7  # last resort, no top_level.txt
+            priority = 8  # last resort, no top_level.txt
         else:
             continue  # unknown artifact type, skip
         scored.append((priority, url))
     scored.sort(key=lambda x: x[0])
     return [url for _, url in scored]
 
+def _install_source(target_dir, extract_dir, call_module):
+    """Move Python source from extract_dir to target_dir, handling src-layout.
 
-def _is_pure_binary_package(urls):
-    """Check whether a package has NO source-capable artifacts (all compiled).
-
-    Returns True if every artifact is a compiled wheel with no sdist or pure wheel.
+    Returns True if at least one .py file was moved, False otherwise.
     """
-    if not urls:
-        return False
-    for u in urls:
-        pkg_type = u.get("packagetype")
-        filename = u.get("filename", "")
-        if pkg_type == "sdist":
-            return False
-        priority, is_pure = _parse_wheel_tag(filename) if pkg_type == "bdist_wheel" else (4, True)
-        if is_pure:
-            return False
-    return True
+    has_py = False
 
-def _verify_top_level(name, extract_root):
-    """Check whether a module name exists at extract_root or one level deep (e.g. src/)."""
-    if os.path.isdir(os.path.join(extract_root, name)) or \
-       os.path.isfile(os.path.join(extract_root, name + ".py")):
-        return True
-    # Search one level deeper for src/ layout
-    for d in os.listdir(extract_root):
-        full = os.path.join(extract_root, d)
-        if os.path.isdir(full) and not d.startswith(".") and \
-           not d.endswith((".dist-info", ".egg-info")):
-            if os.path.isdir(os.path.join(full, name)) or \
-               os.path.isfile(os.path.join(full, name + ".py")):
-                return True
-    return False
+    # Check if call_module already exists directly
+    call_dir = os.path.join(extract_dir, call_module)
+    call_py = call_dir + ".py"
+    moved = False
 
-
-def _resolve_module_path(name, extract_root):
-    """Find the actual path of a module within extract_root (handles src/ layout).
-    Returns the subdirectory path or None if not found."""
-    # Direct match
-    dir_path = os.path.join(extract_root, name)
-    if os.path.isdir(dir_path):
-        return dir_path
-    if os.path.isfile(dir_path + ".py"):
-        return dir_path + ".py"
-    # Search one level deep
-    for d in os.listdir(extract_root):
-        full = os.path.join(extract_root, d)
-        if os.path.isdir(full) and not d.startswith(".") and \
-           not d.endswith((".dist-info", ".egg-info")):
-            dir_path = os.path.join(full, name)
-            if os.path.isdir(dir_path) or os.path.isfile(dir_path + ".py"):
-                return dir_path
-    return None
-
-
-def _select_from_top_level(entries, pkg_name, extract_dir):
-    """Select best module from multi-entry top_level.txt."""
-    if not entries:
-        return None
-    norm_pkg = pkg_name.replace("-", "_")
-    matching = [e for e in entries if e.replace("-", "_") == norm_pkg]
-    if len(matching) == 1:
-        return matching[0]
-    if matching:
-        return max(matching, key=lambda e: sum(
-            1 for _, _, fs in os.walk(os.path.join(extract_dir, e)) for f in fs if f.endswith(".py")))
-    if entries:
-        best = max(entries, key=lambda e: sum(
-            1 for _, _, fs in os.walk(os.path.join(extract_dir, e)) for f in fs if f.endswith(".py"))
-            if os.path.isdir(os.path.join(extract_dir, e)) else 0)
-        logging.warning("top_level.txt entries %s do not match pkg %s, selected %s",
-                       entries, pkg_name, best)
-        return best
-    return None
-
-
-def _parse_setup_cfg(extract_dir):
-    """Parse setup.cfg [options] to find top-level package name. Returns name or None."""
-    cfg_path = os.path.join(extract_dir, "setup.cfg")
-    if not os.path.isfile(cfg_path):
-        return None
-    try:
-        from configparser import ConfigParser
-        cp = ConfigParser()
-        cp.read(cfg_path)
-    except Exception:
-        return None
-    if not cp.has_section("options"):
-        return None
-    packages = cp.get("options", "packages", fallback="").strip()
-    package_dir = cp.get("options", "package_dir", fallback="").strip()
-    src_prefix = ""
-    if package_dir:
-        for part in package_dir.split("\n"):
-            part = part.strip()
-            if "=" in part:
-                k, v = part.split("=", 1)
-                k = k.strip()
-                v = v.strip()
-                if k == "":
-                    src_prefix = v + "/"
-    if not packages or packages in ("find:", "find_namespace:"):
-        search_dir = os.path.join(extract_dir, src_prefix) if src_prefix else extract_dir
-        if os.path.isdir(search_dir):
-            for d in sorted(os.listdir(search_dir)):
-                if d.startswith(".") or d.endswith((".dist-info", ".egg-info", ".data", ".libs")):
-                    continue
-                full = os.path.join(search_dir, d)
-                if os.path.isdir(full) and os.path.isfile(os.path.join(full, "__init__.py")):
-                    return d
-        return None
+    if os.path.isdir(call_dir) or os.path.isfile(call_py):
+        # Direct match — move all top-level items to target_dir
+        for item in os.listdir(extract_dir):
+            src = os.path.join(extract_dir, item)
+            dst = os.path.join(target_dir, item)
+            if os.path.exists(dst):
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)
+                else:
+                    os.remove(dst)
+            shutil.move(src, dst)
+        moved = True
     else:
-        return packages.split()[0].strip() or None
+        # Check src/ layout — move src/ contents to target_dir
+        src_dir = os.path.join(extract_dir, "src")
+        if os.path.isdir(src_dir):
+            call_src = os.path.join(src_dir, call_module)
+            if os.path.isdir(call_src) or os.path.isfile(call_src + ".py"):
+                for item in os.listdir(src_dir):
+                    src = os.path.join(src_dir, item)
+                    dst = os.path.join(target_dir, item)
+                    if os.path.exists(dst):
+                        if os.path.isdir(dst):
+                            shutil.rmtree(dst)
+                        else:
+                            os.remove(dst)
+                    shutil.move(src, dst)
+                moved = True
 
-
-def _score_module_candidate(dirname, pkg_name):
-    """Score a directory candidate for top-level module root. Reject if < 3."""
-    score = 0
-    norm = pkg_name.replace("-", "_")
-    is_name_match = (dirname == norm or dirname == pkg_name)
-    if is_name_match:
-        score += 3
-    # Only penalize non-matching names (e.g. "testpath" matching "testpath" is fine)
-    for prefix in ("test", "docs", "example", "bench"):
-        if not is_name_match and (dirname.startswith(prefix) or
-            dirname.startswith(prefix + "_") or dirname.startswith(prefix + "-")):
-            score -= 5
-    return score
-
-
-def _write_marker(path):
-    """Write an empty marker file."""
-    try:
-        with open(path, "w") as f:
-            pass
-    except OSError:
-        pass
-
-
-def _finish_identify(module_name, package_name, target_dir, extract_root=None):
-    """Write .call_module, update cache, remove .call_module_failed.
-
-    If extract_root is given, moves the module directory from extract_root to
-    target_dir/{module_name}/ so main.py can find it at the expected path.
-    """
-    call_module_file = os.path.join(target_dir, ".call_module")
-    call_module_failed = os.path.join(target_dir, ".call_module_failed")
-
-    # Move module from extract_root to target_dir
-    if extract_root is not None:
-        module_path = _resolve_module_path(module_name, extract_root)
-        if module_path is None:
-            # Root-as-package: __init__.py at extract_root → root IS the module
-            if os.path.isfile(os.path.join(extract_root, "__init__.py")):
-                dest = os.path.join(target_dir, module_name)
-                os.makedirs(dest, exist_ok=True)
-                for item in os.listdir(extract_root):
-                    shutil.move(os.path.join(extract_root, item),
-                               os.path.join(dest, item))
-            else:
-                return None
-        if os.path.isfile(module_path) and module_path.endswith(".py"):
-            # Single-file module: move to {target_dir}/{name}.py
-            dest = os.path.join(target_dir, module_name + ".py")
-            if os.path.exists(dest):
-                os.remove(dest)
-            shutil.move(module_path, dest)
-        elif os.path.isfile(module_path + ".py"):
-            # _resolve_module_path returned path without .py for file
-            # in subdir (e.g. src/decorator.py → src/decorator)
-            py_path = module_path + ".py"
-            dest = os.path.join(target_dir, module_name + ".py")
-            if os.path.exists(dest):
-                os.remove(dest)
-            shutil.move(py_path, dest)
-        else:
-            dest = os.path.join(target_dir, module_name)
-            if os.path.exists(dest):
-                shutil.rmtree(dest)
-            shutil.move(module_path, dest)
-
-    with open(call_module_file, "w") as f:
-        f.write(module_name)
-    if os.path.exists(call_module_failed):
-        os.remove(call_module_failed)
-    _save_call_module_map(version_path_prefix, package_name, module_name, is_auto=True)
-    return module_name
-
-
-def _identify_call_module(package_name, target_dir, is_wheel=False, extract_root=None):
-    """4-level identification pipeline for the top-level module of a package.
-
-    Returns module name on success, None on failure.
-    On success: writes .call_module, updates call_module_map.json.
-    On failure: writes .call_module_failed.
-    """
-    call_module_file = os.path.join(target_dir, ".call_module")
-    call_module_failed = os.path.join(target_dir, ".call_module_failed")
-
-    # Gate: already identified
-    if os.path.exists(call_module_file):
-        try:
-            with open(call_module_file) as f:
-                return f.read().strip()
-        except OSError:
-            pass
-
-    if extract_root is None or not os.path.isdir(extract_root):
-        _write_marker(call_module_failed)
-        return None
-
-    # Step 1: top_level.txt (wheel only)
-    if is_wheel:
-        for d in os.listdir(extract_root):
-            if d.endswith(".dist-info"):
-                tl_path = os.path.join(extract_root, d, "top_level.txt")
-                if os.path.isfile(tl_path):
-                    try:
-                        with open(tl_path) as f:
-                            entries = [l.strip() for l in f if l.strip()]
-                    except OSError:
-                        entries = []
-                    if entries:
-                        selected = _select_from_top_level(entries, package_name, extract_root)
-                        if selected and _verify_top_level(selected, extract_root):
-                            return _finish_identify(selected, package_name, target_dir, extract_root)
+        # Search one level deep for call_module (e.g. nested wrapper dir)
+        if not moved:
+            for d in os.listdir(extract_dir):
+                full = os.path.join(extract_dir, d)
+                if not os.path.isdir(full) or d.startswith(".") or \
+                   d.endswith((".dist-info", ".egg-info", ".data", ".libs")):
+                    continue
+                call_in = os.path.join(full, call_module)
+                if os.path.isdir(call_in) or os.path.isfile(call_in + ".py"):
+                    # Move contents to target_dir
+                    for item in os.listdir(full):
+                        src = os.path.join(full, item)
+                        dst = os.path.join(target_dir, item)
+                        if os.path.exists(dst):
+                            if os.path.isdir(dst):
+                                shutil.rmtree(dst)
+                            else:
+                                os.remove(dst)
+                        shutil.move(src, dst)
+                    moved = True
                     break
 
-    # Step 2: call_module_map.json
-    module_from_map = _lookup_call_module(package_name)
-    if module_from_map != package_name:
-        if _verify_top_level(module_from_map, extract_root):
-            return _finish_identify(module_from_map, package_name, target_dir, extract_root)
-
-    # Step 3: setup.cfg
-    module_from_cfg = _parse_setup_cfg(extract_root)
-    if module_from_cfg and _verify_top_level(module_from_cfg, extract_root):
-        return _finish_identify(module_from_cfg, package_name, target_dir, extract_root)
-
-    # Step 4: heuristic scoring (root + one level deep for src/ layout)
-    scored = []
-    def _scan_candidates(search_dir, parent_dir_name=""):
-        for d in os.listdir(search_dir):
-            if d.startswith(".") or d.endswith((".dist-info", ".egg-info", ".data", ".libs")):
-                continue
-            full = os.path.join(search_dir, d)
-            if not os.path.isdir(full):
-                continue
-            s = _score_module_candidate(d, package_name)
-            if os.path.isfile(os.path.join(full, "__init__.py")):
-                s += 2
-            if parent_dir_name == "src":
-                s += 1
-            if s > 0:
-                scored.append((s, d))
-    _scan_candidates(extract_root)
-    # Also scan known layout subdirectories: src/, lib/, py_src/
-    for sub in ("src", "lib", "py_src"):
-        sub_dir = os.path.join(extract_root, sub)
-        if os.path.isdir(sub_dir):
-            _scan_candidates(sub_dir, parent_dir_name=sub)
-    if scored:
-        scored.sort(reverse=True)
-        best_score, best_dir = scored[0]
-        # If only one candidate has __init__.py, accept with lower threshold
-        threshold = 2 if len([s for s, d in scored if s >= 2]) == 1 else 3
-        if best_score >= threshold:
-            return _finish_identify(best_dir, package_name, target_dir, extract_root)
-
-    # Step 4b: single-file module fallback (e.g. six.py, src/decorator.py)
-    norm = package_name.replace("-", "_")
-    all_py_candidates = []
-    for search_dir in [extract_root] + [
-        os.path.join(extract_root, sub) for sub in ("src", "lib", "py_src")
-        if os.path.isdir(os.path.join(extract_root, sub))
-    ]:
-        for d in os.listdir(search_dir):
-            if d.startswith("."):
-                continue
-            full = os.path.join(search_dir, d)
-            if os.path.isfile(full) and d.endswith(".py"):
-                mod_name = d[:-3]
-                if mod_name in ("setup", "conftest", "test", "conf"):
+        # Auto-detect fallback: find any top-level Python package
+        if not moved:
+            for d in sorted(os.listdir(extract_dir)):
+                full = os.path.join(extract_dir, d)
+                if not os.path.isdir(full) or d.startswith(".") or \
+                   d.endswith((".dist-info", ".egg-info", ".data", ".libs")):
                     continue
-                if "_test" in mod_name or mod_name.endswith("_test") or \
-                   "unittest" in mod_name or mod_name == "test":
+                if os.path.isfile(os.path.join(full, "__init__.py")):
+                    for item in os.listdir(extract_dir):
+                        src = os.path.join(extract_dir, item)
+                        dst = os.path.join(target_dir, item)
+                        if os.path.exists(dst):
+                            if os.path.isdir(dst):
+                                shutil.rmtree(dst)
+                            else:
+                                os.remove(dst)
+                        shutil.move(src, dst)
+                    moved = True
+                    break
+
+        # Single-file module fallback (e.g. six.py, decorator.py)
+        if not moved:
+            for d in sorted(os.listdir(extract_dir)):
+                if d.startswith("."):
                     continue
-                # Name match → immediate accept
-                if mod_name == norm or mod_name == package_name:
-                    return _finish_identify(mod_name, package_name, target_dir, extract_root)
-                all_py_candidates.append(mod_name)
-    # No name match but only one candidate → accept (e.g. pysocks→socks.py)
-    if len(all_py_candidates) == 1:
-        return _finish_identify(all_py_candidates[0], package_name, target_dir, extract_root)
+                full = os.path.join(extract_dir, d)
+                if os.path.isfile(full) and d.endswith(".py") and d != "setup.py":
+                    shutil.move(full, os.path.join(target_dir, d))
+                    moved = True
+                    break
 
-    # Step 4c: root-as-package (__init__.py at extract root)
-    if os.path.isfile(os.path.join(extract_root, "__init__.py")):
-        return _finish_identify(package_name, package_name, target_dir, extract_root)
+    # Verify .py files exist
+    has_py = any(f.endswith('.py') for _, _, files in os.walk(target_dir)
+                 for f in files)
+    return has_py
 
-    # Step 4d: C-extension fallback — package in known map, all Python
-    # heuristics failed, but C sources exist (e.g. greenlet with greenlet.c).
-    norm = package_name.replace("-", "_")
-    mapped = HARDCODED_MODULE_MAP.get(norm)
-    if mapped is not None:
-        c_files = [f for f in os.listdir(extract_root)
-                   if f.endswith(('.c', '.h', '.pyx'))]
-        if c_files:
-            return _finish_identify(
-                mapped, package_name,
-                target_dir, extract_root=None)  # None skips source move
+def _promote_purelib(target_dir):
+    """Lift .data/purelib/ and .data/platlib/ contents to target_dir root (PEP 427).
 
-    # All failed
-    _write_marker(call_module_failed)
-    return None
+    Some wheels place Python source under {name}.data/purelib/ or
+    {name}.data/platlib/ instead of the archive root. This function detects
+    and promotes those nested directories so API extraction can find them.
+    """
+    for d in os.listdir(target_dir):
+        if not d.endswith(".data"):
+            continue
+        data_dir = os.path.join(target_dir, d)
+        for sub in ("purelib", "platlib"):
+            sub_path = os.path.join(data_dir, sub)
+            if os.path.isdir(sub_path):
+                for item in os.listdir(sub_path):
+                    src = os.path.join(sub_path, item)
+                    dst = os.path.join(target_dir, item)
+                    if not os.path.exists(dst):
+                        shutil.move(src, dst)
+                shutil.rmtree(data_dir)
+                break
+
+
+def _merge_core_namespace(target_dir, call_module):
+    """Merge {call_module}_core/ into {call_module}/ (KB-07 Layer 2).
+
+    Detects forwarding patterns like tensorflow_core → tensorflow by
+    AST-parsing {call_module}/__init__.py. When found, moves subpackages
+    from the _core directory into the main directory.
+    """
+    init_path = os.path.join(target_dir, call_module, "__init__.py")
+    if not os.path.isfile(init_path):
+        return
+    try:
+        with open(init_path) as f:
+            tree = ast.parse(f.read())
+    except SyntaxError:
+        return
+    core_mod = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module and node.module.startswith(call_module + "_core"):
+                core_mod = node.module.split(".")[0]
+                break
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith(call_module + "_core"):
+                    core_mod = alias.name.split(".")[0]
+                    break
+    if core_mod is None:
+        return
+    core_path = os.path.join(target_dir, core_mod)
+    if not os.path.isdir(core_path):
+        return
+    for item in os.listdir(core_path):
+        src = os.path.join(core_path, item)
+        dst = os.path.join(target_dir, call_module, item)
+        if os.path.exists(dst):
+            continue  # don't overwrite existing (e.g. __init__.py)
+        shutil.move(src, dst)
+    shutil.rmtree(core_path)
+
+
+def _keep_dist_info(target_dir, package_name, version):
+    """Verify .dist-info/ is preserved for METADATA access (KB-08 download side).
+
+    When _extract_archive flattens a wheel, .dist-info/ ends up at target_dir
+    root. This is automatic for wheels; for sdists there is no .dist-info.
+    Returns True if .dist-info/ exists, False otherwise.
+    """
+    dist_dir = os.path.join(target_dir, f"{package_name}-{version}.dist-info")
+    return os.path.isdir(dist_dir)
 
 
 def _extract_archive(archive_path, target_dir):
@@ -697,16 +587,19 @@ def _build_fallback_candidates(package_name, version):
                 continue
             pkg_type = u.get("packagetype", "")
             if pkg_type == "bdist_wheel":
-                prio, pure = _parse_wheel_tag(fname)
+                prio, pure, py_major = _parse_wheel_tag(fname)
                 platform_ok = ("any" in fname) or (_plat and _plat in fname)
                 if pure:
                     candidates.append((prio if platform_ok else 4, url, True))
                 elif platform_ok:
-                    candidates.append((5, url, True))
+                    if py_major == 3:
+                        candidates.append((5, url, True))
+                    else:
+                        candidates.append((6, url, True))
                 else:
-                    candidates.append((6, url, True))  # compiled, any platform
+                    candidates.append((7, url, True))  # compiled, any platform
             elif pkg_type == "sdist":
-                candidates.append((7, url, False))
+                candidates.append((8, url, False))
         candidates.sort(key=lambda x: x[0])
     except requests.RequestException:
         pass
@@ -715,19 +608,13 @@ def _build_fallback_candidates(package_name, version):
 
 def download_pypi_source(package_name, version=None, python_version="3.7", output_dir="."):
     target_dir = f"{library_path_prefix}{package_name}/{package_name}{version}"
+    call_module = get_library_call_module(package_name)
 
-    # Gate 1: already identified
-    call_module_file = os.path.join(target_dir, ".call_module")
-    if os.path.exists(call_module_file):
-        try:
-            with open(call_module_file) as f:
-                cached = f.read().strip()
-            dest = os.path.join(target_dir, cached)
-            if os.path.exists(dest) or os.path.exists(dest + ".py"):
-                _stats["skipped"] += 1
-                return
-        except OSError:
-            pass
+    # Gate 1: source already present
+    call_path = os.path.join(target_dir, call_module)
+    if os.path.isdir(call_path) or os.path.isfile(call_path + ".py"):
+        _stats["skipped"] += 1
+        return
 
     # Gate 2: permanently broken (no source)
     if os.path.exists(target_dir + ".no_source"):
@@ -829,25 +716,20 @@ def download_pypi_source(package_name, version=None, python_version="3.7", outpu
                             package_name, version)
             return
 
-        # --- Identification phase ---
-        identified = _identify_call_module(package_name, target_dir,
-                                           is_wheel=is_wheel,
-                                           extract_root=extract_dir)
-        if identified is not None:
+        # --- Post-processing and install ---
+        call_module = get_library_call_module(package_name)
+        _promote_purelib(extract_dir)
+        if _install_source(target_dir, extract_dir, call_module):
+            _merge_core_namespace(target_dir, call_module)
+            _keep_dist_info(target_dir, package_name, version)
             _stats["downloaded"] += 1
         else:
             _stats["failed"] += 1
-            logging.warning("call_module identification failed for %s==%s",
+            logging.warning("No Python source found for %s==%s",
                             package_name, version)
 
 def extract_fine_grained_knowledge(lib, version):
-    # Prefer .call_module (set by identification) over get_library_call_module
-    call_module_file = f"{library_path_prefix}{lib}/{lib}{version}/.call_module"
-    if os.path.exists(call_module_file):
-        with open(call_module_file) as f:
-            library_call_module = f.read().strip()
-    else:
-        library_call_module = get_library_call_module(lib)
+    library_call_module = get_library_call_module(lib)
     library_path = f"{library_path_prefix}{lib}/{lib}{version}/{library_call_module}"
 
     # Gate: previously confirmed no extractable API (e.g. C extension)
@@ -1071,7 +953,7 @@ if __name__ == '__main__':
                 for ver in version_ls.get(lib, {}).get(python_version, []):
                     constraint = get_library_constraint_from_metadata(lib, ver, python_version)
                     for dep in constraint:
-                        base_dep = dep.split('[')[0]
+                        base_dep = dep.split('[')[0].lower()
                         if base_dep not in known_libs and base_dep not in discovered:
                             discovered.add(base_dep)
             cache = {'lib_names': lib_names_key, 'python_version': python_version,
@@ -1110,7 +992,9 @@ if __name__ == '__main__':
                     _stats["crashed"] += 1
                     logging.exception("Corrupted library_version.json, resetting")
                     data = {}
-                data[dep] = {python_version: compatible_versions}
+                if dep not in data:
+                    data[dep] = {}
+                data[dep][python_version] = compatible_versions
                 lv_path = f"{version_path_prefix}library_version.json"
                 tmp_path = lv_path + ".tmp"
                 with open(tmp_path, "w") as f:
