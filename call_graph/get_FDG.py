@@ -274,6 +274,8 @@ def get_library_constraint_from_metadata(pkg, version, python_version):
                 metadata = file.read()
             requires_dist_pattern = r"Requires-Dist: (.+?)(?=\n|$)"
             requires_dist = re.findall(requires_dist_pattern, metadata)
+            if not requires_dist:
+                requires_dist = None
         except Exception:
             pass
 
@@ -282,12 +284,13 @@ def get_library_constraint_from_metadata(pkg, version, python_version):
         library_path = f"{library_path_prefix}{pkg}/{pkg}{version}/{pkg}"
         if os.path.exists(library_path):
             s = get_packname_and_cons_from_setup(library_path)
-            for i in s:
-                if len(i) == 2:
-                    res[i[0]] = i[1].replace("-", ".")
-                else:
-                    res[i[0]] = None
-            return res
+            if s:
+                for i in s:
+                    if len(i) == 2:
+                        res[i[0]] = i[1].replace("-", ".")
+                    else:
+                        res[i[0]] = None
+                return res
 
     # Priority 3: PyPI JSON (fallback, may have data loss)
     if requires_dist is None:
